@@ -668,6 +668,8 @@ defmodule Edifice.CoverageBatchDTest do
     # which cannot trace integer arguments. Test the function signature exists
     # and use Nx.Random.normal directly for codebook generation in tests.
     test "init_codebook function exists" do
+      # Ensure module is loaded — defn modules may not be auto-loaded in test context
+      Code.ensure_loaded!(VQVAE)
       assert function_exported?(VQVAE, :init_codebook, 2)
       assert function_exported?(VQVAE, :init_codebook, 3)
     end

@@ -2030,11 +2030,13 @@ defmodule Edifice.GradientSmokeTest do
 
   @tag timeout: 120_000
   test "gradient flows through linear_probe" do
+    # Use task: :regression to avoid softmax — sum(softmax(x)) = 1 always,
+    # so its gradient is zero and the gradient check would fail
     model =
       Edifice.build(:linear_probe,
         input_size: @embed,
         num_classes: 5,
-        task: :classification
+        task: :regression
       )
 
     input = random_tensor({@batch, @embed})
@@ -2100,11 +2102,14 @@ defmodule Edifice.GradientSmokeTest do
 
   @tag timeout: 120_000
   test "gradient flows through das_probe" do
+    # Use task: :regression to avoid softmax — sum(softmax(x)) = 1 always,
+    # so its gradient is zero and the gradient check would fail
     model =
       Edifice.build(:das_probe,
         input_size: @embed,
         subspace_dim: 8,
-        num_classes: 5
+        num_classes: 5,
+        task: :regression
       )
 
     input = random_tensor({@batch, @embed})

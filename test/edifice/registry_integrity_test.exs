@@ -217,6 +217,7 @@ defmodule Edifice.RegistryIntegrityTest do
     # Scientific
     fno: [in_channels: 1, out_channels: 1, hidden_channels: 8, modes: 4],
     deep_onet: [num_sensors: 8, coord_dim: 3],
+    tno: [num_sensors: 8, history_dim: 4, coord_dim: 3],
     # RWKV needs head_size <= hidden_size
     rwkv: [head_size: 4],
     # Reservoir uses input_size

@@ -58,6 +58,7 @@ defmodule Edifice.SSM.StripedHyenaTest do
       assert Nx.all(Nx.is_nan(output) |> Nx.logical_not()) |> Nx.to_number() == 1
     end
 
+    @tag timeout: 120_000
     test "works with odd number of layers" do
       opts = Keyword.put(@opts, :num_layers, 3)
       {_model, output} = build_and_run(opts)

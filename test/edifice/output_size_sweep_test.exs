@@ -101,7 +101,8 @@ defmodule Edifice.OutputSizeSweepTest do
     head_size: 4,
     dims: [8],
     depths: [1],
-    num_latents: 4
+    num_latents: 4,
+    codebook_size: 32
   ]
 
   # Architecture-specific overrides for output_size/1

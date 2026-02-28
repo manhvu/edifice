@@ -162,15 +162,14 @@ defmodule Edifice.Recurrent.MinGRU do
     # Candidate projection: candidate = W_h * x
     candidate_proj = Axon.dense(normed, hidden_size, name: "#{name}_candidate")
 
-    # Apply MinGRU recurrence: h_t = (1 - z_t) * h_{t-1} + z_t * candidate_t
-    recurrence_input = Axon.concatenate([gate_proj, candidate_proj], axis: 2, name: "#{name}_cat")
-
+    # Apply MinGRU recurrence via two-input layer
+    # Dispatches to fused CUDA kernel on GPU, falls back to Elixir scan on CPU
     recurrence_output =
-      Axon.nx(
-        recurrence_input,
-        fn combined ->
-          min_gru_scan(combined, hidden_size)
+      Axon.layer(
+        fn gates, candidates, _opts ->
+          Edifice.CUDA.FusedScan.mingru(gates, candidates)
         end,
+        [gate_proj, candidate_proj],
         name: "#{name}_recurrence"
       )
 
@@ -178,16 +177,21 @@ defmodule Edifice.Recurrent.MinGRU do
     Axon.add(input, recurrence_output, name: "#{name}_residual")
   end
 
-  defp min_gru_scan(combined, hidden_size) do
-    # combined: [batch, seq_len, hidden_size * 2]
-    batch_size = Nx.axis_size(combined, 0)
-    seq_len = Nx.axis_size(combined, 1)
+  @doc false
+  # Sequential scan for MinGRU.
+  #
+  # Interface designed to match the fused CUDA kernel signature:
+  #   gates:      [batch, seq_len, hidden] — raw gate logits (sigmoid applied here)
+  #   candidates: [batch, seq_len, hidden] — candidate values
+  #
+  # Returns: [batch, seq_len, hidden] — all hidden states
+  def min_gru_scan(gates, candidates) do
+    batch_size = Nx.axis_size(gates, 0)
+    seq_len = Nx.axis_size(gates, 1)
+    hidden_size = Nx.axis_size(gates, 2)
 
-    # Split gate and candidate
-    gate_pre = Nx.slice_along_axis(combined, 0, hidden_size, axis: 2)
-    candidate = Nx.slice_along_axis(combined, hidden_size, hidden_size, axis: 2)
-
-    z = Nx.sigmoid(gate_pre)
+    # Apply sigmoid to gate logits
+    z = Nx.sigmoid(gates)
 
     # Sequential scan: h_t = (1 - z_t) * h_{t-1} + z_t * candidate_t
     h_init = Nx.broadcast(0.0, {batch_size, hidden_size})
@@ -195,7 +199,7 @@ defmodule Edifice.Recurrent.MinGRU do
     {_, h_list} =
       Enum.reduce(0..(seq_len - 1), {h_init, []}, fn t, {h_prev, acc} ->
         z_t = Nx.slice_along_axis(z, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        c_t = Nx.slice_along_axis(candidate, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        c_t = Nx.slice_along_axis(candidates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
 
         h_t = Nx.add(Nx.multiply(Nx.subtract(1.0, z_t), h_prev), Nx.multiply(z_t, c_t))
         {h_t, [h_t | acc]}

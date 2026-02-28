@@ -174,19 +174,14 @@ defmodule Edifice.Recurrent.MinLSTM do
     # Candidate projection: candidate = W_h * x
     candidate_proj = Axon.dense(normed, hidden_size, name: "#{name}_candidate")
 
-    # Concatenate all projections for the recurrence
-    recurrence_input =
-      Axon.concatenate([forget_proj, input_proj, candidate_proj],
-        axis: 2,
-        name: "#{name}_cat"
-      )
-
+    # Apply MinLSTM recurrence via three-input layer
+    # Dispatches to fused CUDA kernel on GPU, falls back to Elixir scan on CPU
     recurrence_output =
-      Axon.nx(
-        recurrence_input,
-        fn combined ->
-          min_lstm_scan(combined, hidden_size)
+      Axon.layer(
+        fn forget_gates, input_gates, candidates, _opts ->
+          Edifice.CUDA.FusedScan.minlstm(forget_gates, input_gates, candidates)
         end,
+        [forget_proj, input_proj, candidate_proj],
         name: "#{name}_recurrence"
       )
 
@@ -194,19 +189,23 @@ defmodule Edifice.Recurrent.MinLSTM do
     Axon.add(input, recurrence_output, name: "#{name}_residual")
   end
 
-  defp min_lstm_scan(combined, hidden_size) do
-    # combined: [batch, seq_len, hidden_size * 3]
-    batch_size = Nx.axis_size(combined, 0)
-    seq_len = Nx.axis_size(combined, 1)
-
-    # Split forget, input, and candidate
-    f_pre = Nx.slice_along_axis(combined, 0, hidden_size, axis: 2)
-    i_pre = Nx.slice_along_axis(combined, hidden_size, hidden_size, axis: 2)
-    candidate = Nx.slice_along_axis(combined, hidden_size * 2, hidden_size, axis: 2)
+  @doc false
+  # Sequential scan for MinLSTM.
+  #
+  # Interface designed to match the fused CUDA kernel signature:
+  #   forget_gates: [batch, seq_len, hidden] — raw forget gate logits (sigmoid applied here)
+  #   input_gates:  [batch, seq_len, hidden] — raw input gate logits (sigmoid applied here)
+  #   candidates:   [batch, seq_len, hidden] — candidate values
+  #
+  # Returns: [batch, seq_len, hidden] — all hidden states
+  def min_lstm_scan(forget_gates, input_gates, candidates) do
+    batch_size = Nx.axis_size(forget_gates, 0)
+    seq_len = Nx.axis_size(forget_gates, 1)
+    hidden_size = Nx.axis_size(forget_gates, 2)
 
     # Compute gates
-    f_gate = Nx.sigmoid(f_pre)
-    i_gate = Nx.sigmoid(i_pre)
+    f_gate = Nx.sigmoid(forget_gates)
+    i_gate = Nx.sigmoid(input_gates)
 
     # Normalize: f' = f/(f+i), i' = i/(f+i) so f' + i' = 1
     gate_sum = Nx.add(f_gate, Nx.add(i_gate, norm_eps()))
@@ -220,7 +219,7 @@ defmodule Edifice.Recurrent.MinLSTM do
       Enum.reduce(0..(seq_len - 1), {c_init, []}, fn t, {c_prev, acc} ->
         f_t = Nx.slice_along_axis(f_norm, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
         i_t = Nx.slice_along_axis(i_norm, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        cand_t = Nx.slice_along_axis(candidate, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        cand_t = Nx.slice_along_axis(candidates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
 
         c_t = Nx.add(Nx.multiply(f_t, c_prev), Nx.multiply(i_t, cand_t))
         {c_t, [c_t | acc]}

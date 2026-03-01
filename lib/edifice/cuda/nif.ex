@@ -58,4 +58,8 @@ defmodule Edifice.CUDA.NIF do
   @doc false
   def fused_gated_delta_net_scan(_q, _k, _v, _beta, _alpha, _batch, _seq, _heads, _head_dim),
     do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_delta_product_scan(_q, _k, _v, _beta, _batch, _seq, _n_h, _heads, _head_dim),
+    do: :erlang.nif_error(:not_loaded)
 end

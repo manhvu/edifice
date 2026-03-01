@@ -170,6 +170,30 @@ defmodule Edifice.CUDA.FusedScan do
   end
 
   @doc """
+  DeltaProduct scan: matrix-state recurrence with Householder products.
+
+  Inputs:
+    q:    [B, T, H, d]       — query vectors (shared across Householder steps)
+    k:    [B, T, n_h, H, d]  — key vectors per Householder step
+    v:    [B, T, n_h, H, d]  — value vectors per Householder step
+    beta: [B, T, n_h, H]     — scalar gate per head per step (post-sigmoid)
+
+  Returns [B, T, H, d] RMS-normalized output.
+  """
+  def delta_product_scan(q, k, v, beta) do
+    cond do
+      custom_call_available?() ->
+        delta_product_custom_call(q, k, v, beta)
+
+      cuda_available?(q) ->
+        delta_product_fused(q, k, v, beta)
+
+      true ->
+        Edifice.Recurrent.DeltaProduct.delta_product_scan_fallback(q, k, v, beta)
+    end
+  end
+
+  @doc """
   sLSTM scan with hidden-to-hidden matmul fused into the kernel.
 
   Inputs are pre-computed W@x `[batch, seq_len, 4*hidden]` and recurrent
@@ -506,6 +530,75 @@ defmodule Edifice.CUDA.FusedScan do
     o_list |> Enum.reverse() |> Nx.stack(axis: 1)
   end
 
+  # DeltaProduct: Householder product state transitions
+  defp delta_product_custom_call(q, k, v, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+    output = Nx.template({batch, seq_len, num_heads, head_dim}, {:f, 32})
+
+    Nx.Shared.optional(:fused_delta_product_scan, [q, k, v, beta], output, fn q, k, v, beta ->
+      delta_product_scan_fallback(q, k, v, beta)
+    end)
+  end
+
+  defp delta_product_scan_fallback(q, k, v, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+
+    # k/v: [B, T, n_h, H, d], beta: [B, T, n_h, H]
+    {_, _, num_householder, _, _} = Nx.shape(k)
+
+    s0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_heads, head_dim, head_dim})
+    norm_eps = 1.0e-6
+
+    {_, o_list} =
+      Enum.reduce(0..(seq_len - 1), {s0, []}, fn t, {s_prev, acc} ->
+        q_t = Nx.slice_along_axis(q, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+        # Apply n_h Householder updates
+        s_updated =
+          Enum.reduce(0..(num_householder - 1), s_prev, fn j, s_acc ->
+            # k_{t,j}: [B, n_h, H, d] -> slice j -> [B, H, d]
+            k_tj = Nx.slice_along_axis(Nx.slice_along_axis(k, t, 1, axis: 1), j, 1, axis: 2)
+                   |> Nx.squeeze(axes: [1, 2])
+            v_tj = Nx.slice_along_axis(Nx.slice_along_axis(v, t, 1, axis: 1), j, 1, axis: 2)
+                   |> Nx.squeeze(axes: [1, 2])
+            beta_tj = Nx.slice_along_axis(Nx.slice_along_axis(beta, t, 1, axis: 1), j, 1, axis: 2)
+                      |> Nx.squeeze(axes: [1, 2])
+
+            # L2 normalize key
+            k_norm = Nx.sqrt(Nx.add(Nx.sum(Nx.multiply(k_tj, k_tj), axes: [-1], keep_axes: true), norm_eps))
+            k_normalized = Nx.divide(k_tj, k_norm)
+
+            # S^T @ k: need cross-row product
+            # Use the reformulation: S_new = S + beta * k @ (v - S^T @ k)^T
+            # S^T @ k: [B,H,D,D]^T @ [B,H,D] = [B,H,D]
+            # s_acc is [B,H,D,D], k_normalized is [B,H,D]
+            st_k = Nx.dot(s_acc, [2], [0, 1], Nx.new_axis(k_normalized, -1), [2], [0, 1])
+                   |> Nx.squeeze(axes: [-1])
+
+            # error = v - S^T@k
+            error = Nx.subtract(v_tj, st_k)
+
+            # S += beta * outer(k, error)
+            beta_broad = beta_tj |> Nx.new_axis(-1) |> Nx.new_axis(-1)
+            k_col = Nx.new_axis(k_normalized, -1)
+            err_row = Nx.new_axis(error, -2)
+            update = Nx.multiply(beta_broad, Nx.multiply(k_col, err_row))
+            Nx.add(s_acc, update)
+          end)
+
+        # Output: o_t = S @ q_t with RMS norm
+        o_t = Nx.dot(s_updated, [3], [0, 1], Nx.new_axis(q_t, -1), [2], [0, 1])
+              |> Nx.squeeze(axes: [-1])
+
+        rms = Nx.sqrt(Nx.add(Nx.mean(Nx.multiply(o_t, o_t), axes: [-1], keep_axes: true), norm_eps))
+        o_t_normed = Nx.divide(o_t, rms)
+
+        {s_updated, [o_t_normed | acc]}
+      end)
+
+    o_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
   # sLSTM: fused R@h matmul with log-domain exponential gating
   defp slstm_custom_call(wx, recurrent_weight) do
     {batch, seq_len, hidden4} = Nx.shape(wx)
@@ -614,7 +707,8 @@ defmodule Edifice.CUDA.FusedScan do
 
     Nx.Shared.optional(:fused_selective_scan, [x, dt, a, b, c], output,
       fn x, dt, a, b, c ->
-        selective_scan_fallback(x, dt, a, b, c)
+        # Must be defn-compatible (no Nx.to_number) since EXLA traces the fallback
+        Edifice.SSM.Common.selective_scan_fallback(x, dt, a, b, c)
       end)
   end
 
@@ -949,6 +1043,35 @@ defmodule Edifice.CUDA.FusedScan do
 
       {:error, reason} ->
         raise "CUDA fused GatedDeltaNet scan failed: #{reason}"
+    end
+  end
+
+  defp delta_product_fused(q, k, v, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+    {_, _, num_householder, _, _} = Nx.shape(k)
+
+    q_ptr = Nx.to_pointer(q, mode: :local)
+    k_ptr = Nx.to_pointer(k, mode: :local)
+    v_ptr = Nx.to_pointer(v, mode: :local)
+    beta_ptr = Nx.to_pointer(beta, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_delta_product_scan(
+           q_ptr.address, k_ptr.address, v_ptr.address, beta_ptr.address,
+           batch, seq_len, num_householder, num_heads, head_dim
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * num_heads * head_dim * 4
+
+        Nx.from_pointer(
+          {backend_for(q), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, num_heads, head_dim}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused DeltaProduct scan failed: #{reason}"
     end
   end
 

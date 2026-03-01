@@ -241,23 +241,18 @@ defmodule Edifice.Recurrent.DeltaProduct do
     {batch, seq_len, _hidden} = Nx.shape(q)
     hidden_size = num_heads * head_dim
 
-    # Reshape Q to multi-head: [batch, seq, num_heads, head_dim]
+    # Reshape to kernel-expected layout:
+    # q: [B, T, H, d]
     q_heads = Nx.reshape(q, {batch, seq_len, num_heads, head_dim})
 
-    # Reshape K to per-step multi-head: [batch, seq, n_h, num_heads, head_dim]
-    k_heads =
-      k_all
-      |> Nx.reshape({batch, seq_len, num_householder, num_heads, head_dim})
+    # k: [B, T, n_h, H, d]
+    k_heads = Nx.reshape(k_all, {batch, seq_len, num_householder, num_heads, head_dim})
 
-    # Reshape V similarly
-    v_heads =
-      v_all
-      |> Nx.reshape({batch, seq_len, num_householder, num_heads, head_dim})
+    # v: [B, T, n_h, H, d]
+    v_heads = Nx.reshape(v_all, {batch, seq_len, num_householder, num_heads, head_dim})
 
-    # Beta: [batch, seq, n_h, num_heads]
-    beta_raw =
-      beta_all
-      |> Nx.reshape({batch, seq_len, num_householder, num_heads})
+    # beta: [B, T, n_h, H]
+    beta_raw = Nx.reshape(beta_all, {batch, seq_len, num_householder, num_heads})
 
     # Apply sigmoid (or 2*sigmoid for allow_neg_eigval)
     beta =
@@ -267,141 +262,93 @@ defmodule Edifice.Recurrent.DeltaProduct do
         Nx.sigmoid(beta_raw)
       end
 
-    # Run per-head recurrence with interleaved Householder steps
-    # Process each head independently
-    # For simplicity, flatten heads into batch dimension
-    # q: [batch * num_heads, seq, head_dim]
-    q_flat =
-      Nx.reshape(
-        Nx.transpose(q_heads, axes: [0, 2, 1, 3]),
-        {batch * num_heads, seq_len, head_dim}
-      )
+    # Dispatch through FusedScan (3-tier: custom call → NIF → Elixir fallback)
+    # All inputs are in kernel layout: q [B,T,H,d], k/v [B,T,n_h,H,d], beta [B,T,n_h,H]
+    output = Edifice.CUDA.FusedScan.delta_product_scan(q_heads, k_heads, v_heads, beta)
 
-    # k: [batch * num_heads, seq, n_h, head_dim]
-    k_flat =
-      Nx.reshape(
-        Nx.transpose(k_heads, axes: [0, 3, 1, 2, 4]),
-        {batch * num_heads, seq_len, num_householder, head_dim}
-      )
-
-    # v: [batch * num_heads, seq, n_h, head_dim]
-    v_flat =
-      Nx.reshape(
-        Nx.transpose(v_heads, axes: [0, 3, 1, 2, 4]),
-        {batch * num_heads, seq_len, num_householder, head_dim}
-      )
-
-    # beta: [batch * num_heads, seq, n_h]
-    beta_flat =
-      Nx.reshape(
-        Nx.transpose(beta, axes: [0, 3, 1, 2]),
-        {batch * num_heads, seq_len, num_householder}
-      )
-
-    # Sequential recurrence (DeltaProduct is inherently sequential per-token,
-    # but the n_h steps within each token are also sequential)
-    output =
-      delta_product_sequential(
-        q_flat,
-        k_flat,
-        v_flat,
-        beta_flat,
-        seq_len,
-        num_householder,
-        head_dim
-      )
-
-    # Reshape back: [batch, num_heads, seq, head_dim] -> [batch, seq, hidden_size]
-    output_heads = Nx.reshape(output, {batch, num_heads, seq_len, head_dim})
-
-    output_seq =
-      Nx.reshape(Nx.transpose(output_heads, axes: [0, 2, 1, 3]), {batch, seq_len, hidden_size})
+    # Output is [B, T, H, d] -> reshape to [B, T, hidden_size]
+    output_seq = Nx.reshape(output, {batch, seq_len, hidden_size})
 
     # Apply output gate
     Nx.multiply(output_seq, gate)
   end
 
-  defp delta_product_sequential(q, k, v, beta, seq_len, num_householder, head_dim) do
-    # q: [bh, seq, head_dim]
-    # k: [bh, seq, n_h, head_dim]
-    # v: [bh, seq, n_h, head_dim]
-    # beta: [bh, seq, n_h]
-    bh = Nx.axis_size(q, 0)
+  @doc """
+  Pure Elixir fallback for the DeltaProduct Householder scan.
 
-    # State matrix S: [bh, head_dim, head_dim] initialized to zeros
-    s_init = Nx.broadcast(0.0, {bh, head_dim, head_dim})
+  Takes kernel-layout inputs:
+    q:    [B, T, H, d]       — query vectors
+    k:    [B, T, n_h, H, d]  — key vectors per Householder step
+    v:    [B, T, n_h, H, d]  — value vectors per Householder step
+    beta: [B, T, n_h, H]     — scalar gate per head per step (post-sigmoid)
 
-    # Process each timestep
+  Returns [B, T, H, d] RMS-normalized output.
+  """
+  def delta_product_scan_fallback(q, k, v, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+    {_, _, num_householder, _, _} = Nx.shape(k)
+
+    # State matrix S: [B, H, d, d] initialized to zeros
+    s_init = Nx.broadcast(0.0, {batch, num_heads, head_dim, head_dim})
+
     {_s_final, outputs} =
       Enum.reduce(0..(seq_len - 1)//1, {s_init, []}, fn t, {s_prev, acc} ->
         # For each Householder step j = 0..n_h-1:
-        # S = (I - beta_{t,j} * k_{t,j} k_{t,j}^T) * S + beta_{t,j} * k_{t,j} * v_{t,j}^T
+        # S = (I - beta * k*k^T) @ S + beta * k * v^T
         s_updated =
           Enum.reduce(0..(num_householder - 1)//1, s_prev, fn j, s_acc ->
-            # k_{t,j}: [bh, head_dim]
+            # k_{t,j}: [B, H, d]
             k_tj =
-              Nx.squeeze(
-                Nx.slice_along_axis(Nx.slice_along_axis(k, t, 1, axis: 1), j, 1, axis: 2),
-                axes: [1, 2]
-              )
+              Nx.slice_along_axis(Nx.slice_along_axis(k, t, 1, axis: 1), j, 1, axis: 2)
+              |> Nx.squeeze(axes: [1, 2])
 
             v_tj =
-              Nx.squeeze(
-                Nx.slice_along_axis(Nx.slice_along_axis(v, t, 1, axis: 1), j, 1, axis: 2),
-                axes: [1, 2]
-              )
+              Nx.slice_along_axis(Nx.slice_along_axis(v, t, 1, axis: 1), j, 1, axis: 2)
+              |> Nx.squeeze(axes: [1, 2])
 
             beta_tj =
-              Nx.squeeze(
-                Nx.slice_along_axis(Nx.slice_along_axis(beta, t, 1, axis: 1), j, 1, axis: 2),
-                axes: [1, 2]
-              )
+              Nx.slice_along_axis(Nx.slice_along_axis(beta, t, 1, axis: 1), j, 1, axis: 2)
+              |> Nx.squeeze(axes: [1, 2])
 
-            # L2 normalize key
+            # L2 normalize key: k_tj is [B, H, d]
             k_norm =
               Nx.sqrt(
-                Nx.add(Nx.sum(Nx.multiply(k_tj, k_tj), axes: [1], keep_axes: true), @norm_eps)
+                Nx.add(Nx.sum(Nx.multiply(k_tj, k_tj), axes: [-1], keep_axes: true), @norm_eps)
               )
 
             k_normalized = Nx.divide(k_tj, k_norm)
 
-            # beta_tj: [bh] -> [bh, 1, 1] for broadcasting
-            beta_expanded = Nx.reshape(beta_tj, {bh, 1, 1})
+            # beta_tj: [B, H] -> [B, H, 1, 1] for broadcasting
+            beta_broad = beta_tj |> Nx.new_axis(-1) |> Nx.new_axis(-1)
 
-            # k k^T: [bh, head_dim, head_dim]
-            k_col = Nx.new_axis(k_normalized, 2)
-            k_row = Nx.new_axis(k_normalized, 1)
-            kk_t = Nx.dot(k_col, [2], [0], k_row, [1], [0])
+            # k k^T: [B, H, d, d]
+            k_col = Nx.new_axis(k_normalized, -1)    # [B, H, d, 1]
+            k_row = Nx.new_axis(k_normalized, -2)    # [B, H, 1, d]
+            kk_t = Nx.dot(k_col, [3], [0, 1], k_row, [2], [0, 1])
 
-            # S = (I - beta * k k^T) * S + beta * k * v^T
-            # = S - beta * (k k^T) * S + beta * k * v^T
-            # First term: S - beta * (k k^T @ S)
-            kkt_s = Nx.dot(kk_t, [2], [0], s_acc, [1], [0])
-            s_after_decay = Nx.subtract(s_acc, Nx.multiply(beta_expanded, kkt_s))
+            # S = S - beta * (k k^T @ S) + beta * k * v^T
+            kkt_s = Nx.dot(kk_t, [3], [0, 1], s_acc, [2], [0, 1])
+            s_after_decay = Nx.subtract(s_acc, Nx.multiply(beta_broad, kkt_s))
 
-            # Second term: + beta * k * v^T
-            v_row = Nx.new_axis(v_tj, 1)
-            kv_t = Nx.dot(k_col, [2], [0], v_row, [1], [0])
-            Nx.add(s_after_decay, Nx.multiply(beta_expanded, kv_t))
+            # + beta * k * v^T
+            v_row = Nx.new_axis(v_tj, -2)            # [B, H, 1, d]
+            kv_t = Nx.dot(k_col, [3], [0, 1], v_row, [2], [0, 1])
+            Nx.add(s_after_decay, Nx.multiply(beta_broad, kv_t))
           end)
 
-        # Output: o_t = S_t @ q_t
-        # q_t: [bh, head_dim]
-        q_t = Nx.squeeze(Nx.slice_along_axis(q, t, 1, axis: 1), axes: [1])
-        # S_t @ q_t: [bh, head_dim, head_dim] @ [bh, head_dim] -> [bh, head_dim]
-        o_t = Nx.dot(s_updated, [2], [0], Nx.new_axis(q_t, 2), [1], [0])
-        o_t = Nx.squeeze(o_t, axes: [2])
+        # Output: o_t = S_t @ q_t with RMS norm
+        q_t = Nx.slice_along_axis(q, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        # q_t: [B, H, d], S: [B, H, d, d] -> contract S axis 3 with q axis 2
+        o_t = Nx.dot(s_updated, [3], [0, 1], q_t, [2], [0, 1])
 
-        # Apply RMS norm per output
         rms =
-          Nx.sqrt(Nx.add(Nx.mean(Nx.multiply(o_t, o_t), axes: [1], keep_axes: true), @norm_eps))
+          Nx.sqrt(Nx.add(Nx.mean(Nx.multiply(o_t, o_t), axes: [-1], keep_axes: true), @norm_eps))
 
         o_t_normed = Nx.divide(o_t, rms)
 
         {s_updated, [o_t_normed | acc]}
       end)
 
-    # Stack outputs: [bh, seq, head_dim]
     outputs
     |> Enum.reverse()
     |> Nx.stack(axis: 1)

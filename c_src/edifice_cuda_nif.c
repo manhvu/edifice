@@ -69,6 +69,7 @@ static scan_2input_launch_fn s_elu_gru_launch     = NULL;
 static scan_2input_launch_fn s_real_gru_launch    = NULL;
 static scan_2input_launch_fn s_diag_linear_launch = NULL;
 static scan_2input_launch_fn s_liquid_launch      = NULL;
+static scan_2input_launch_fn s_linear_launch     = NULL;
 static cuda_malloc_fn    s_cuda_malloc    = NULL;
 static cuda_free_fn      s_cuda_free      = NULL;
 static cuda_device_synchronize_fn s_cuda_sync = NULL;
@@ -391,6 +392,12 @@ static ERL_NIF_TERM nif_fused_liquid_scan(
     return nif_fused_2input_scan(env, argc, argv, s_liquid_launch, "liquid");
 }
 
+static ERL_NIF_TERM nif_fused_linear_scan(
+    ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    return nif_fused_2input_scan(env, argc, argv, s_linear_launch, "linear");
+}
+
 /* ========================================================================== */
 /* NIF Load — resolve all symbols                                             */
 /* ========================================================================== */
@@ -465,6 +472,8 @@ static int nif_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info) {
         s_kernels_handle, "fused_diag_linear_scan_launch");
     s_liquid_launch = (scan_2input_launch_fn)dlsym(
         s_kernels_handle, "fused_liquid_scan_launch");
+    s_linear_launch = (scan_2input_launch_fn)dlsym(
+        s_kernels_handle, "fused_linear_scan_launch");
 
     return 0;
 }
@@ -487,6 +496,7 @@ static void nif_unload(ErlNifEnv* env, void* priv_data) {
     s_real_gru_launch    = NULL;
     s_diag_linear_launch = NULL;
     s_liquid_launch      = NULL;
+    s_linear_launch      = NULL;
     s_cuda_malloc        = NULL;
     s_cuda_free          = NULL;
     s_cuda_sync          = NULL;
@@ -502,7 +512,8 @@ static ErlNifFunc nif_funcs[] = {
     {"fused_elu_gru_scan",      6, nif_fused_elu_gru_scan,      ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"fused_real_gru_scan",     6, nif_fused_real_gru_scan,     ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"fused_diag_linear_scan",  6, nif_fused_diag_linear_scan,  ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"fused_liquid_scan",       6, nif_fused_liquid_scan,       ERL_NIF_DIRTY_JOB_IO_BOUND}
+    {"fused_liquid_scan",       6, nif_fused_liquid_scan,       ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"fused_linear_scan",       6, nif_fused_linear_scan,       ERL_NIF_DIRTY_JOB_IO_BOUND}
 };
 
 ERL_NIF_INIT(Elixir.Edifice.CUDA.NIF, nif_funcs, nif_load, NULL, NULL, nif_unload)

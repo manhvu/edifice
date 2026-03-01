@@ -43,6 +43,11 @@ extern "C" int fused_liquid_scan_launch(
     const float* tau, const float* activation, const float* h0,
     float* output, int batch, int seq_len, int hidden);
 
+extern "C" int fused_linear_scan_launch(
+    cudaStream_t stream,
+    const float* a_vals, const float* b_vals, const float* h0,
+    float* output, int batch, int seq_len, int hidden);
+
 // ============================================================================
 // CPU reference implementations
 // ============================================================================
@@ -137,6 +142,24 @@ void diag_linear_scan_cpu(
             for (int t = 0; t < seq_len; t++) {
                 int idx = b * seq_len * hidden + t * hidden + h;
                 float a = cpu_sigmoid(a_vals[idx]);
+                float bv = b_vals[idx];
+                state = a * state + bv;
+                output[idx] = state;
+            }
+        }
+    }
+}
+
+void linear_scan_cpu(
+    const float* a_vals, const float* b_vals, const float* h0,
+    float* output, int batch, int seq_len, int hidden
+) {
+    for (int b = 0; b < batch; b++) {
+        for (int h = 0; h < hidden; h++) {
+            float state = h0[b * hidden + h];
+            for (int t = 0; t < seq_len; t++) {
+                int idx = b * seq_len * hidden + t * hidden + h;
+                float a = a_vals[idx];
                 float bv = b_vals[idx];
                 state = a * state + bv;
                 output[idx] = state;
@@ -456,6 +479,23 @@ int main() {
                         32, 32, 256, 505, 0.1f, 10.0f, -1.0f, 1.0f) ? pass++ : fail++);
     (test_2input_kernel("Liquid", fused_liquid_scan_launch, liquid_scan_cpu,
                         1, 32, 512, 506, 0.1f, 10.0f, -1.0f, 1.0f) ? pass++ : fail++);
+
+    printf("\nLinear (generic) tests:\n");
+    // a in [0,1] (pre-computed decay), b in [-1,1] (pre-computed input)
+    (test_2input_kernel("Linear", fused_linear_scan_launch, linear_scan_cpu,
+                        1, 1, 64, 600, 0.0f, 1.0f, -1.0f, 1.0f) ? pass++ : fail++);
+    (test_2input_kernel("Linear", fused_linear_scan_launch, linear_scan_cpu,
+                        1, 32, 256, 601, 0.0f, 1.0f, -1.0f, 1.0f) ? pass++ : fail++);
+    (test_2input_kernel("Linear", fused_linear_scan_launch, linear_scan_cpu,
+                        2, 32, 256, 602, 0.0f, 1.0f, -1.0f, 1.0f) ? pass++ : fail++);
+    (test_2input_kernel("Linear", fused_linear_scan_launch, linear_scan_cpu,
+                        1, 64, 128, 603, 0.0f, 1.0f, -1.0f, 1.0f) ? pass++ : fail++);
+    (test_2input_kernel("Linear", fused_linear_scan_launch, linear_scan_cpu,
+                        1, 256, 64, 604, 0.0f, 1.0f, -1.0f, 1.0f) ? pass++ : fail++);
+    (test_2input_kernel("Linear", fused_linear_scan_launch, linear_scan_cpu,
+                        32, 32, 256, 605, 0.0f, 1.0f, -1.0f, 1.0f) ? pass++ : fail++);
+    (test_2input_kernel("Linear", fused_linear_scan_launch, linear_scan_cpu,
+                        1, 32, 512, 606, 0.0f, 1.0f, -1.0f, 1.0f) ? pass++ : fail++);
 
     printf("\n=== Results: %d passed, %d failed ===\n", pass, fail);
     return fail > 0 ? 1 : 0;

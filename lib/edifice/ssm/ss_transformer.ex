@@ -265,21 +265,10 @@ defmodule Edifice.SSM.SSTransformer do
   end
 
   defp cumulative_ema(x, alpha) do
-    batch_size = Nx.axis_size(x, 0)
-    seq_len = Nx.axis_size(x, 1)
-    hidden_size = Nx.axis_size(x, 2)
-
-    h_init = Nx.broadcast(0.0, {batch_size, hidden_size})
-
-    {_, h_list} =
-      Enum.reduce(0..(seq_len - 1), {h_init, []}, fn t, {h_prev, acc} ->
-        x_t = Nx.slice_along_axis(x, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        a_t = Nx.slice_along_axis(alpha, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        h_t = Nx.add(Nx.multiply(a_t, h_prev), Nx.multiply(Nx.subtract(1.0, a_t), x_t))
-        {h_t, [h_t | acc]}
-      end)
-
-    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+    # h_t = alpha_t * h_{t-1} + (1 - alpha_t) * x_t
+    # Pre-compute a = alpha, b = (1 - alpha) * x for generic linear scan
+    b_vals = Nx.multiply(Nx.subtract(1.0, alpha), x)
+    Edifice.CUDA.FusedScan.linear_scan(alpha, b_vals)
   end
 
   # Multi-head causal attention path

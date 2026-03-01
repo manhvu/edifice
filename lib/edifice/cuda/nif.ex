@@ -46,4 +46,8 @@ defmodule Edifice.CUDA.NIF do
   @doc false
   def fused_liquid_scan(_tau, _act, _h0, _batch, _seq, _hidden),
     do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_linear_scan(_a, _b, _h0, _batch, _seq, _hidden),
+    do: :erlang.nif_error(:not_loaded)
 end

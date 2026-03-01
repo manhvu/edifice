@@ -244,32 +244,28 @@ defmodule Edifice.SSM.GSS do
     # Discretize: A_bar = exp(A) per timestep (fixed dt=1)
     a_bar = Nx.exp(a_diag)
 
-    # Initialize hidden state
-    h = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(x)), {batch_size, hidden_size, state_size})
+    # Pre-compute a and b for all timesteps, reshape 3D state to 2D for linear scan
+    # a_bar: [hidden_size, state_size] → broadcast to [batch, seq_len, hidden_size, state_size]
+    a_expanded = Nx.broadcast(a_bar, {batch_size, seq_len, hidden_size, state_size})
 
-    # Sequential scan: h_t = A_bar * h_{t-1} + B * x_t
-    {_, outputs} =
-      Enum.reduce(0..(seq_len - 1), {h, []}, fn t, {h_prev, acc} ->
-        # x_t: [batch, hidden_size]
-        x_t = Nx.slice_along_axis(x, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+    # bx: B * x for all timesteps
+    # x: [batch, seq_len, hidden_size] → [batch, seq_len, hidden_size, 1]
+    x_expanded = Nx.new_axis(x, 3)
+    bx = Nx.multiply(b_param, x_expanded)
 
-        # h_t = A_bar * h_{t-1} + B * x_t
-        # a_bar: [hidden_size, state_size] broadcast to [batch, hidden_size, state_size]
-        # x_t: [batch, hidden_size] -> [batch, hidden_size, 1]
-        x_expanded = Nx.new_axis(x_t, 2)
-        bx = Nx.multiply(b_param, x_expanded)
-        h_new = Nx.add(Nx.multiply(a_bar, h_prev), bx)
+    # Reshape [B, T, D, N] → [B, T, D*N] for the linear scan kernel
+    flat_dim = hidden_size * state_size
+    a_flat = Nx.reshape(a_expanded, {batch_size, seq_len, flat_dim})
+    bx_flat = Nx.reshape(bx, {batch_size, seq_len, flat_dim})
 
-        # y_t = sum(C * h_t, axis=state_size) -> [batch, hidden_size]
-        y_t = Nx.sum(Nx.multiply(c_param, h_new), axes: [2])
+    # Linear scan: h = a*h + b (fused on CUDA, sequential fallback)
+    h_flat = Edifice.CUDA.FusedScan.linear_scan(a_flat, bx_flat)
 
-        {h_new, [y_t | acc]}
-      end)
+    # Reshape back: [B, T, D*N] → [B, T, D, N]
+    h_seq = Nx.reshape(h_flat, {batch_size, seq_len, hidden_size, state_size})
 
-    # Stack: [batch, seq_len, hidden_size]
-    outputs
-    |> Enum.reverse()
-    |> Nx.stack(axis: 1)
+    # Output projection: y_t = sum(C * h_t, axis=state_dim)
+    Nx.sum(Nx.multiply(c_param, h_seq), axes: [3])
   end
 
   # Initialize A in log-space so that exp(A) is in a good decay range

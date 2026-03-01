@@ -44,6 +44,11 @@ extern "C" int fused_liquid_scan_launch(
     const float* tau, const float* activation, const float* h0,
     float* output, int batch, int seq_len, int hidden);
 
+extern "C" int fused_linear_scan_launch(
+    cudaStream_t stream,
+    const float* a_vals, const float* b_vals, const float* h0,
+    float* output, int batch, int seq_len, int hidden);
+
 #define CUDA_CHECK(call) do { \
     cudaError_t err = (call); \
     if (err != cudaSuccess) { \
@@ -261,6 +266,14 @@ int main() {
         auto& cfg = configs[c];
         auto r = bench_2input(fused_liquid_scan_launch, cfg.batch, cfg.seq_len, cfg.hidden,
                               WARMUP, ITERS, 0.1f, 10.0f, -1.0f, 1.0f);
+        printf("%-42s %10.3f %10.3f %10.3f\n", cfg.label, r.avg_ms, r.min_ms, r.median_ms);
+    }
+
+    printf("\n--- Linear (generic recurrence) ---\n");
+    for (int c = 0; c < n_configs; c++) {
+        auto& cfg = configs[c];
+        auto r = bench_2input(fused_linear_scan_launch, cfg.batch, cfg.seq_len, cfg.hidden,
+                              WARMUP, ITERS, 0.0f, 1.0f, -1.0f, 1.0f);
         printf("%-42s %10.3f %10.3f %10.3f\n", cfg.label, r.avg_ms, r.min_ms, r.median_ms);
     }
 

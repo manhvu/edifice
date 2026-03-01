@@ -329,35 +329,8 @@ defmodule Edifice.Attention.Griffin do
     x_scaled = Nx.multiply(input_scale, x_gated)
 
     # Run the recurrence: h_t = a_t . h_{t-1} + x_scaled_t
-    rg_lru_sequential_scan(a_t, x_scaled)
-  end
-
-  # Sequential scan for RG-LRU
-  # This is simpler than Mamba's scan since a_t is directly the decay factor
-  defp rg_lru_sequential_scan(a, x_scaled) do
-    # a, x_scaled: [batch, seq_len, hidden_size]
-    batch_size = Nx.axis_size(a, 0)
-    seq_len = Nx.axis_size(a, 1)
-    hidden_size = Nx.axis_size(a, 2)
-
-    # Initialize h[-1] = 0
-    h_init = Nx.broadcast(0.0, {batch_size, 1, hidden_size})
-
-    # Sequential recurrence
-    {_, h_list} =
-      Enum.reduce(0..(seq_len - 1), {h_init, []}, fn t, {h_prev, acc} ->
-        a_t = Nx.slice_along_axis(a, t, 1, axis: 1)
-        x_t = Nx.slice_along_axis(x_scaled, t, 1, axis: 1)
-
-        # h_t = a_t * h_{t-1} + x_t
-        h_t = Nx.add(Nx.multiply(a_t, h_prev), x_t)
-        {h_t, [Nx.squeeze(h_t, axes: [1]) | acc]}
-      end)
-
-    # Stack: [batch, seq_len, hidden_size]
-    h_list
-    |> Enum.reverse()
-    |> Nx.stack(axis: 1)
+    # Uses generic linear scan (h = a*h + b) — fused on CUDA, sequential fallback
+    Edifice.CUDA.FusedScan.linear_scan(a_t, x_scaled)
   end
 
   # ============================================================================

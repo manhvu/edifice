@@ -1,0 +1,148 @@
+// Fused Linear Recurrence Scan Kernel
+//
+// Implements the generic linear recurrence: h = a * h + b
+// where a and b are pre-computed tensors. No nonlinearities are applied
+// inside the kernel — all activations (sigmoid, softplus, etc.) are
+// computed on the Elixir/XLA side before calling this kernel.
+//
+// This single kernel covers multiple architecture patterns:
+//   - Griffin RG-LRU:        h = decay * h + x_scaled
+//   - MEGA EMA:              h = alpha * h + (1-alpha)*x  (alpha pre-expanded)
+//   - SSTransformer EMA:     h = a_t * h + (1-a_t)*x_t
+//   - HybridBuilder EMA:     h = a_t * h + (1-a_t)*x_t
+//   - GSS SSM:               h = A_bar * h + B*x  (reshaped to 2D)
+//   - MambaVision SSM:       h = A_bar * h + B*x  (reshaped to 2D)
+//
+// Same thread layout as MinGRU: one thread per (batch, hidden) element,
+// sequential scan through timesteps with state in registers.
+//
+// Two compilation modes:
+//   1. Standalone (-DSTANDALONE): kernel + C-linkage launch wrapper.
+//   2. EXLA FFI (-DEXLA_FFI): kernel + XLA FFI handler + registration.
+//
+// Inputs:
+//   a_vals: [batch, seq_len, hidden] — multiplicative decay coefficients
+//   b_vals: [batch, seq_len, hidden] — additive input terms
+//   h0:     [batch, hidden]          — initial hidden state
+//
+// Output:
+//   output: [batch, seq_len, hidden] — all hidden states
+
+#include <cuda_runtime.h>
+
+// ============================================================================
+// Kernel
+// ============================================================================
+
+__global__ void fused_linear_scan_kernel(
+    const float* __restrict__ a_vals,  // [B, T, H] multiplicative coefficients
+    const float* __restrict__ b_vals,  // [B, T, H] additive terms
+    const float* __restrict__ h0,      // [B, H] initial state
+    float* __restrict__ output,        // [B, T, H] all hidden states
+    int batch, int seq_len, int hidden
+) {
+    int b = blockIdx.x;
+    int h = threadIdx.x + blockIdx.y * blockDim.x;
+
+    if (b >= batch || h >= hidden) return;
+
+    float h_state = h0[b * hidden + h];
+
+    for (int t = 0; t < seq_len; t++) {
+        int idx = b * seq_len * hidden + t * hidden + h;
+        float a = a_vals[idx];
+        float bv = b_vals[idx];
+
+        h_state = a * h_state + bv;
+        output[idx] = h_state;
+    }
+}
+
+// ============================================================================
+// Standalone launch wrapper (C-linkage for NIF / dlopen)
+// ============================================================================
+
+#ifndef EXLA_FFI
+
+extern "C" {
+
+int fused_linear_scan_launch(
+    cudaStream_t stream,
+    const float* a_vals, const float* b_vals, const float* h0,
+    float* output, int batch, int seq_len, int hidden
+) {
+    int threads_per_block = (hidden < 256) ? hidden : 256;
+    int blocks_y = (hidden + threads_per_block - 1) / threads_per_block;
+    dim3 grid(batch, blocks_y);
+    dim3 block(threads_per_block);
+
+    fused_linear_scan_kernel<<<grid, block, 0, stream>>>(
+        a_vals, b_vals, h0, output,
+        batch, seq_len, hidden
+    );
+
+    return (int)cudaGetLastError();
+}
+
+}  // extern "C"
+
+#endif  // !EXLA_FFI
+
+// ============================================================================
+// XLA FFI integration (for EXLA fork)
+// ============================================================================
+
+#ifdef EXLA_FFI
+
+#include "xla/ffi/api/ffi.h"
+#include "xla/ffi/ffi_api.h"
+
+namespace ffi = xla::ffi;
+
+ffi::Error fused_linear_scan_ffi_impl(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::F32> a_vals,
+    ffi::Buffer<ffi::F32> b_vals,
+    ffi::Buffer<ffi::F32> h0,
+    ffi::ResultBuffer<ffi::F32> output
+) {
+    auto dims = a_vals.dimensions();
+    int batch   = static_cast<int>(dims[0]);
+    int seq_len = static_cast<int>(dims[1]);
+    int hidden  = static_cast<int>(dims[2]);
+
+    int threads_per_block = (hidden < 256) ? hidden : 256;
+    int blocks_y = (hidden + threads_per_block - 1) / threads_per_block;
+    dim3 grid(batch, blocks_y);
+    dim3 block(threads_per_block);
+
+    fused_linear_scan_kernel<<<grid, block, 0, stream>>>(
+        reinterpret_cast<const float*>(a_vals.untyped_data()),
+        reinterpret_cast<const float*>(b_vals.untyped_data()),
+        reinterpret_cast<const float*>(h0.untyped_data()),
+        reinterpret_cast<float*>(output->untyped_data()),
+        batch, seq_len, hidden
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
+    }
+
+    return ffi::Error::Success();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    fused_linear_scan, fused_linear_scan_ffi_impl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::F32>>()   // a_vals
+        .Arg<ffi::Buffer<ffi::F32>>()   // b_vals
+        .Arg<ffi::Buffer<ffi::F32>>()   // h0
+        .Ret<ffi::Buffer<ffi::F32>>()   // output
+);
+
+XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(),
+    "exla_fused_linear_scan_f32", "CUDA", fused_linear_scan);
+
+#endif  // EXLA_FFI

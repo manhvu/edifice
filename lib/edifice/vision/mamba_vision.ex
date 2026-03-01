@@ -467,27 +467,24 @@ defmodule Edifice.Vision.MambaVision do
     a_bar = Nx.exp(Nx.multiply(delta_expanded, a_log))
     b_bar = Nx.multiply(Nx.new_axis(delta, 3), Nx.new_axis(b, 2))
 
-    # Sequential scan
-    h_init = Nx.broadcast(Nx.tensor(0.0, type: :f32), {batch, d_inner, d_state})
+    # Pre-compute bx for all timesteps: B_bar * x
+    # b_bar: [batch, seq, d_inner, d_state], x: [batch, seq, d_inner]
+    bx_all = Nx.multiply(b_bar, Nx.new_axis(x, 3))
 
-    {_, outputs} =
-      Enum.reduce(0..(seq_len - 1), {h_init, []}, fn t, {h_prev, acc} ->
-        a_t = Nx.slice_along_axis(a_bar, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        bx_t = Nx.slice_along_axis(b_bar, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        x_t = Nx.slice_along_axis(x, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        c_t = Nx.slice_along_axis(c, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+    # Reshape [B, T, D, N] → [B, T, D*N] for the linear scan kernel
+    flat_dim = d_inner * d_state
+    a_flat = Nx.reshape(a_bar, {batch, seq_len, flat_dim})
+    bx_flat = Nx.reshape(bx_all, {batch, seq_len, flat_dim})
 
-        # h = A_bar * h + B_bar * x
-        bx = Nx.multiply(bx_t, Nx.new_axis(x_t, 2))
-        h = Nx.add(Nx.multiply(a_t, h_prev), bx)
+    # Linear scan: h = a*h + b (fused on CUDA, sequential fallback)
+    h_flat = Edifice.CUDA.FusedScan.linear_scan(a_flat, bx_flat)
 
-        # y = C * h (sum over state dim)
-        y = Nx.sum(Nx.multiply(Nx.new_axis(c_t, 1), h), axes: [2])
+    # Reshape back: [B, T, D*N] → [B, T, D, N]
+    h_seq = Nx.reshape(h_flat, {batch, seq_len, d_inner, d_state})
 
-        {h, [y | acc]}
-      end)
-
-    outputs |> Enum.reverse() |> Nx.stack(axis: 1)
+    # Output projection: y = sum(C * h, axes: [state_dim])
+    # c: [batch, seq, d_state] → [batch, seq, 1, d_state] for broadcast
+    Nx.sum(Nx.multiply(Nx.new_axis(c, 2), h_seq), axes: [3])
   end
 
   # ============================================================================

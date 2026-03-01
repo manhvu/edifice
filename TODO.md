@@ -168,7 +168,9 @@ Full research notes in `notebooks/research/interpretability_architectures.md`.
 
 ## Open — Infrastructure
 
-- [ ] **CUDA Kernel Fusion** — Fused RNN kernels for LSTM/GRU/minGRU/minLSTM. Axon unrolls each timestep as separate kernel launches (70-600ms for seq_len=32 vs 14ms for gated_ssm). Investigate cuDNN integration, custom CUDA kernels, XLA fusion passes, or seq_len=1 inference. See `bench/inference_latency.exs`.
+- [x] **CUDA Kernel Fusion (P0)** — Fused scan kernels for MinGRU, MinLSTM, NativeRecurrence (3 variants), and Liquid (exact solver). Each kernel runs one thread per (batch, hidden) element with state in registers, eliminating per-timestep kernel launch overhead. NIF bridge with GC-tracked cudaMalloc, XLA FFI handlers for EXLA integration. 8 CUDA kernels total. Files: `native/cuda/fused_*.cu`, `c_src/edifice_cuda_nif.c`, `lib/edifice/cuda/{nif,fused_scan}.ex`.
+- [x] **CUDA Kernel Fusion (P1)** — Generic `fused_linear_scan` kernel (`h = a*h + b`, no in-kernel nonlinearities) covering 6 architectures: Griffin RG-LRU, MEGA EMA, SSTransformer EMA, HybridBuilder EMA, GSS SSM, MambaVision SSM. All pre-compute `a` and `b` on the XLA side. GSS and MambaVision reshape 3D state `[B,T,D,N]` → `[B,T,D*N]` to reuse the 2D kernel. File: `native/cuda/fused_linear_scan.cu`.
+- [ ] **CUDA Kernel Fusion (P2)** — Matrix-state recurrences (DeltaNet, GatedDeltaNet, KDA, RLA) have `[D,D]` state matrices per hidden unit, making them harder to fuse. Feasibility TBD.
 - [ ] **EXLA GPU Custom Call Infrastructure** — Prototype for GPU-native custom calls bypassing NIF copy overhead. Branch `gpu-custom-calls` in `/home/dori/git/melee/nx` (commit `5a7d8cc8`). Adds nvcc compilation to EXLA Makefile, `gpu_add.cu` prototype kernel, `Value.gpu_add/3` stablehlo.custom_call binding, and `GPUCustomCall` module. Validated pattern for FlashAttention. Intent: clean up and PR to `elixir-nx/nx` separately.
 
 ## Open — Codebase Quality (from 2026-02-27 evaluation)

@@ -224,25 +224,19 @@ defmodule Edifice.Attention.Mega do
     # Learnable alpha (decay rate): sigmoid to keep in [0, 1]
     alpha = Nx.sigmoid(alpha_logit)
 
-    # Sequential EMA scan: h_t = alpha * h_{t-1} + (1 - alpha) * x_t
+    # EMA scan: h_t = alpha * h_{t-1} + (1 - alpha) * x_t
+    # Pre-compute a = broadcast(alpha, [B,T,D]) and b = (1-alpha) * projected
     batch_size = Nx.axis_size(input, 0)
-    ema_dim = Nx.axis_size(proj_w, 1)
     seq_len = Nx.axis_size(input, 1)
+    ema_dim = Nx.axis_size(proj_w, 1)
     one_minus_alpha = Nx.subtract(1.0, alpha)
 
-    # Initialize hidden state
-    h = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(input)), {batch_size, ema_dim})
+    # Broadcast alpha to [batch, seq_len, ema_dim] for the scan
+    a_vals = Nx.broadcast(alpha, {batch_size, seq_len, ema_dim})
+    b_vals = Nx.multiply(one_minus_alpha, projected)
 
-    # Collect EMA outputs for each timestep
-    {ema_outputs, _final_h} =
-      Enum.reduce(0..(seq_len - 1), {[], h}, fn t, {outputs, h_prev} ->
-        x_t = Nx.slice_along_axis(projected, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        h_new = Nx.add(Nx.multiply(alpha, h_prev), Nx.multiply(one_minus_alpha, x_t))
-        {[Nx.new_axis(h_new, 1) | outputs], h_new}
-      end)
-
-    # Stack: [batch, seq_len, ema_dim]
-    ema_seq = ema_outputs |> Enum.reverse() |> Nx.concatenate(axis: 1)
+    # Generic linear scan: h = a*h + b (fused on CUDA, sequential fallback)
+    ema_seq = Edifice.CUDA.FusedScan.linear_scan(a_vals, b_vals)
 
     # Project back: [batch, seq_len, ema_dim] @ [ema_dim, hidden_size]
     Nx.dot(ema_seq, [2], out_w, [0]) |> Nx.add(out_b)

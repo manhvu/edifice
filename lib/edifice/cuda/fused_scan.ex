@@ -68,6 +68,24 @@ defmodule Edifice.CUDA.FusedScan do
     end
   end
 
+  @doc """
+  Generic linear recurrence scan: h = a * h + b.
+
+  Both `a` and `b` are pre-computed [batch, seq_len, hidden] tensors.
+  No nonlinearities are applied — all activations must be computed
+  before calling this function.
+
+  Covers: Griffin RG-LRU, MEGA EMA, SSTransformer EMA, HybridBuilder EMA,
+  GSS SSM, MambaVision SSM.
+  """
+  def linear_scan(a_vals, b_vals) do
+    if cuda_available?(a_vals) do
+      linear_scan_fused(a_vals, b_vals)
+    else
+      linear_scan_fallback(a_vals, b_vals)
+    end
+  end
+
   # ============================================================================
   # CUDA fused paths
   # ============================================================================
@@ -237,6 +255,35 @@ defmodule Edifice.CUDA.FusedScan do
     end
   end
 
+  defp linear_scan_fused(a_vals, b_vals) do
+    {batch, seq_len, hidden} = Nx.shape(a_vals)
+
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}, backend: backend_for(a_vals)), {batch, hidden})
+
+    a_ptr = Nx.to_pointer(a_vals, mode: :local)
+    b_ptr = Nx.to_pointer(b_vals, mode: :local)
+    h0_ptr = Nx.to_pointer(h0, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_linear_scan(
+           a_ptr.address, b_ptr.address, h0_ptr.address,
+           batch, seq_len, hidden
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * hidden * 4
+
+        Nx.from_pointer(
+          {backend_for(a_vals), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, hidden}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused linear scan failed: #{reason}"
+    end
+  end
+
   defp liquid_fused(tau, activation) do
     {batch, seq_len, hidden} = Nx.shape(tau)
 
@@ -264,6 +311,27 @@ defmodule Edifice.CUDA.FusedScan do
       {:error, reason} ->
         raise "CUDA fused Liquid scan failed: #{reason}"
     end
+  end
+
+  # ============================================================================
+  # Fallback: generic linear recurrence scan (CPU/BinaryBackend)
+  # ============================================================================
+
+  @doc false
+  def linear_scan_fallback(a_vals, b_vals) do
+    {batch, seq_len, hidden} = Nx.shape(a_vals)
+
+    h_init = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(a_vals)), {batch, hidden})
+
+    {_, h_list} =
+      Enum.reduce(0..(seq_len - 1), {h_init, []}, fn t, {h_prev, acc} ->
+        a_t = Nx.slice_along_axis(a_vals, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        b_t = Nx.slice_along_axis(b_vals, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        h_t = Nx.add(Nx.multiply(a_t, h_prev), b_t)
+        {h_t, [h_t | acc]}
+      end)
+
+    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
   end
 
   # ============================================================================

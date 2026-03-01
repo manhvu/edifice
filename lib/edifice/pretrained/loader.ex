@@ -68,23 +68,38 @@ defmodule Edifice.Pretrained do
     strict = Keyword.get(opts, :strict, true)
     transforms = key_map.tensor_transforms()
 
+    # Build concat lookup: source_key -> {target_key, axis, [source_keys]}
+    {concat_source_lookup, concat_targets} = build_concat_lookup(key_map)
+
     checkpoint = apply(Safetensors, :read!, [path])
 
-    {mapped, unmapped} =
-      Enum.reduce(checkpoint, {%{}, []}, fn {ext_key, tensor}, {mapped_acc, unmapped_acc} ->
+    {mapped, unmapped, concat_acc} =
+      Enum.reduce(checkpoint, {%{}, [], %{}}, fn {ext_key, tensor},
+                                                  {mapped_acc, unmapped_acc, concat_acc} ->
         case key_map.map_key(ext_key) do
           :skip ->
-            {mapped_acc, unmapped_acc}
+            {mapped_acc, unmapped_acc, concat_acc}
 
           mapped_key when is_binary(mapped_key) ->
             tensor = Transform.apply_transform(mapped_key, transforms, tensor)
             tensor = if dtype, do: Transform.cast(tensor, dtype), else: tensor
-            {Map.put(mapped_acc, mapped_key, tensor), unmapped_acc}
+
+            case Map.get(concat_source_lookup, mapped_key) do
+              nil ->
+                {Map.put(mapped_acc, mapped_key, tensor), unmapped_acc, concat_acc}
+
+              _target_info ->
+                concat_acc = Map.put(concat_acc, mapped_key, tensor)
+                {mapped_acc, unmapped_acc, concat_acc}
+            end
 
           :unmapped ->
-            {mapped_acc, [ext_key | unmapped_acc]}
+            {mapped_acc, [ext_key | unmapped_acc], concat_acc}
         end
       end)
+
+    # Resolve concat groups: concatenate accumulated tensors for each target
+    mapped = resolve_concat_groups(mapped, concat_acc, concat_targets)
 
     if strict and unmapped != [] do
       raise ArgumentError,
@@ -121,6 +136,39 @@ defmodule Edifice.Pretrained do
     |> then(&apply(Safetensors, :read!, [&1]))
     |> Map.keys()
     |> Enum.sort()
+  end
+
+  # Builds a lookup from source keys to their concat target info.
+  # Returns {source_lookup, targets} where:
+  #   source_lookup: %{source_key => {target_key, axis, [source_keys]}}
+  #   targets: %{target_key => {[source_keys], axis}}
+  defp build_concat_lookup(key_map) do
+    if function_exported?(key_map, :concat_keys, 0) do
+      targets = key_map.concat_keys()
+
+      source_lookup =
+        Enum.flat_map(targets, fn {target_key, {source_keys, axis}} ->
+          Enum.map(source_keys, fn src -> {src, {target_key, axis, source_keys}} end)
+        end)
+        |> Map.new()
+
+      {source_lookup, targets}
+    else
+      {%{}, %{}}
+    end
+  end
+
+  # Concatenates accumulated partial tensors for each concat target.
+  # Skips targets where not all source keys are present in the accumulator.
+  defp resolve_concat_groups(mapped, concat_acc, concat_targets) do
+    Enum.reduce(concat_targets, mapped, fn {target_key, {source_keys, axis}}, acc ->
+      if Enum.all?(source_keys, &Map.has_key?(concat_acc, &1)) do
+        tensors = Enum.map(source_keys, &Map.fetch!(concat_acc, &1))
+        Map.put(acc, target_key, Nx.concatenate(tensors, axis: axis))
+      else
+        acc
+      end
+    end)
   end
 
   defp ensure_safetensors! do

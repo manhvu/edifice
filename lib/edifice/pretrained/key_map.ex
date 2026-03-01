@@ -63,4 +63,36 @@ defmodule Edifice.Pretrained.KeyMap do
 
   """
   @callback tensor_transforms() :: [{Regex.t(), (Nx.Tensor.t() -> Nx.Tensor.t())}]
+
+  @doc """
+  Returns concatenation rules for combining multiple source keys into one target.
+
+  Some architectures (e.g., ViT) use combined QKV projections in Edifice but separate
+  Q/K/V weights in the source checkpoint. This callback lets you specify how to
+  concatenate multiple mapped keys into a single target key.
+
+  Returns a map where each key is the target Axon parameter path and the value is a
+  tuple of `{source_keys, concat_axis}`. The loader accumulates tensors for each
+  source key and concatenates them along `concat_axis` when all parts have arrived.
+
+  Source keys must appear in the order they should be concatenated.
+
+  This callback is optional. If not implemented, no concatenation is performed.
+
+  ## Example
+
+      def concat_keys do
+        %{
+          "block_0_attn_qkv.kernel" => {[
+            "block_0_attn_q.kernel",
+            "block_0_attn_k.kernel",
+            "block_0_attn_v.kernel"
+          ], 0}
+        }
+      end
+
+  """
+  @callback concat_keys() :: %{String.t() => {[String.t()], non_neg_integer()}}
+
+  @optional_callbacks [concat_keys: 0]
 end

@@ -205,6 +205,9 @@ defmodule Edifice.CUDA.FusedScan do
       custom_call_available?() ->
         slstm_custom_call(wx, recurrent_weight)
 
+      cuda_available?(wx) ->
+        slstm_fused(wx, recurrent_weight)
+
       true ->
         Edifice.Recurrent.SLSTM.slstm_scan_fallback(wx, recurrent_weight)
     end
@@ -224,6 +227,9 @@ defmodule Edifice.CUDA.FusedScan do
     cond do
       custom_call_available?() ->
         ttt_custom_call(q, k, v, eta, w0, ln_gamma, ln_beta)
+
+      cuda_available?(q) ->
+        ttt_fused(q, k, v, eta, w0, ln_gamma, ln_beta)
 
       true ->
         Edifice.Recurrent.TTT.ttt_scan_fallback(q, k, v, eta, w0, ln_gamma, ln_beta)
@@ -245,8 +251,69 @@ defmodule Edifice.CUDA.FusedScan do
       custom_call_available?() ->
         selective_scan_custom_call(x, dt, a, b, c)
 
+      cuda_available?(x) ->
+        selective_scan_fused(x, dt, a, b, c)
+
       true ->
         Edifice.SSM.Common.selective_scan_fallback(x, dt, a, b, c)
+    end
+  end
+
+  @doc """
+  KDA (Kimi Delta Attention) scan with channel-wise decay.
+
+  All inputs pre-computed on Elixir side:
+    q:     [B, T, H, d] — query vectors (L2-normalized)
+    k:     [B, T, H, d] — key vectors (L2-normalized)
+    v:     [B, T, H, d] — value vectors
+    alpha: [B, T, H, d] — per-channel decay (log-space)
+    beta:  [B, T, H]    — scalar update gate per head (post-sigmoid)
+
+  Returns [B, T, H, d] retrieval outputs.
+  """
+  def kda_scan(q, k, v, alpha, beta) do
+    cond do
+      custom_call_available?() ->
+        kda_custom_call(q, k, v, alpha, beta)
+
+      cuda_available?(q) ->
+        kda_fused(q, k, v, alpha, beta)
+
+      true ->
+        kda_scan_fallback(q, k, v, alpha, beta)
+    end
+  end
+
+  @doc """
+  RLA/RDN dual-state scan with residual error correction.
+
+  Inputs (all pre-computed):
+    q:     [B, T, H, d] — query vectors
+    k:     [B, T, H, d] — key vectors
+    v:     [B, T, H, d] — value vectors
+    alpha: [B, T, H, 1, 1] — decay gate (per-head scalar, broadcastable)
+    beta:  [B, T, H, 1, 1] — base update rate
+    gamma: [B, T, H, 1, 1] — residual update rate
+
+  Options:
+    variant: :rla (0) or :rdn (1)
+    clip_threshold: float (default 1.0)
+
+  Returns [B, T, H, d] outputs.
+  """
+  def rla_scan(q, k, v, alpha, beta, gamma, opts \\ []) do
+    variant = Keyword.get(opts, :variant, :rla)
+    clip_threshold = Keyword.get(opts, :clip_threshold, 1.0)
+
+    cond do
+      custom_call_available?() ->
+        rla_custom_call(q, k, v, alpha, beta, gamma, variant, clip_threshold)
+
+      cuda_available?(q) ->
+        rla_fused(q, k, v, alpha, beta, gamma, variant, clip_threshold)
+
+      true ->
+        rla_scan_fallback(q, k, v, alpha, beta, gamma, variant, clip_threshold)
     end
   end
 
@@ -712,49 +779,135 @@ defmodule Edifice.CUDA.FusedScan do
       end)
   end
 
-  defp selective_scan_fallback(x, dt, a, b_proj, c_proj) do
-    {batch, seq_len, hidden} = Nx.shape(x)
-    {_h, state} = Nx.shape(a)
+  # KDA: channel-wise decay delta rule
+  defp kda_custom_call(q, k, v, alpha, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+    output = Nx.template({batch, seq_len, num_heads, head_dim}, {:f, 32})
 
-    results =
-      for bi <- 0..(batch - 1) do
-        per_hidden =
-          for hi <- 0..(hidden - 1) do
-            h_state = List.duplicate(0.0, state)
+    Nx.Shared.optional(:fused_kda_scan, [q, k, v, alpha, beta], output,
+      fn q, k, v, alpha, beta ->
+        kda_scan_fallback(q, k, v, alpha, beta)
+      end)
+  end
 
-            {_, outputs} =
-              Enum.reduce(0..(seq_len - 1), {h_state, []}, fn t, {hs, acc} ->
-                x_t = Nx.to_number(x[bi][t][hi])
-                dt_t = Nx.to_number(dt[bi][t][hi])
-                dt_t = min(max(dt_t, 0.001), 0.1)
+  defp kda_scan_fallback(q, k, v, alpha, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
 
-                {new_hs, y_t} =
-                  Enum.reduce(0..(state - 1), {hs, 0.0}, fn s, {hs_acc, y_acc} ->
-                    a_s = Nx.to_number(a[hi][s])
-                    b_s = Nx.to_number(b_proj[bi][t][s])
-                    c_s = Nx.to_number(c_proj[bi][t][s])
+    s0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_heads, head_dim, head_dim})
 
-                    a_bar = :math.exp(dt_t * a_s)
-                    b_bar = dt_t * b_s
+    {_, o_list} =
+      Enum.reduce(0..(seq_len - 1), {s0, []}, fn t, {s_prev, acc} ->
+        q_t = Nx.slice_along_axis(q, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        k_t = Nx.slice_along_axis(k, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        v_t = Nx.slice_along_axis(v, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        alpha_t = Nx.slice_along_axis(alpha, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        beta_t = Nx.slice_along_axis(beta, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
 
-                    new_h = a_bar * Enum.at(hs_acc, s) + b_bar * x_t
-                    {List.replace_at(hs_acc, s, new_h), y_acc + c_s * new_h}
-                  end)
+        # Channel-wise decay: exp(alpha_t) per channel
+        # alpha_t: [B, H, d] -> broadcast to [B, H, d, d] via new_axis on last
+        decay = Nx.exp(alpha_t) |> Nx.new_axis(3)
+        s_decayed = Nx.multiply(decay, s_prev)
 
-                {new_hs, [y_t | acc]}
-              end)
+        # Retrieval: S @ k -> [B, H, d]
+        sk = Nx.dot(s_decayed, [3], [0, 1], Nx.new_axis(k_t, -1), [2], [0, 1])
+             |> Nx.squeeze(axes: [-1])
 
-            Enum.reverse(outputs)
+        # Delta rule: S += beta * outer(v - S@k, k)
+        # beta_t: [B, H] -> [B, H, 1, 1]
+        beta_bc = beta_t |> Nx.new_axis(-1) |> Nx.new_axis(-1)
+        error = Nx.subtract(v_t, sk)
+        delta = Nx.multiply(beta_bc, Nx.multiply(Nx.new_axis(error, -1), Nx.new_axis(k_t, -2)))
+        s_t = Nx.add(s_decayed, delta)
+
+        # Output: S @ q
+        o_t = Nx.dot(s_t, [3], [0, 1], Nx.new_axis(q_t, -1), [2], [0, 1])
+              |> Nx.squeeze(axes: [-1])
+        {s_t, [o_t | acc]}
+      end)
+
+    o_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # RLA/RDN: dual-state residual linear attention
+  defp rla_custom_call(q, k, v, alpha, beta, gamma, variant, clip_threshold) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+    output = Nx.template({batch, seq_len, num_heads, head_dim}, {:f, 32})
+
+    Nx.Shared.optional(:fused_rla_scan, [q, k, v, alpha, beta, gamma], output,
+      fn q, k, v, alpha, beta, gamma ->
+        rla_scan_fallback(q, k, v, alpha, beta, gamma, variant, clip_threshold)
+      end)
+  end
+
+  defp rla_scan_fallback(q, k, v, alpha, beta, gamma, variant, clip_threshold) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+
+    s0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_heads, head_dim, head_dim})
+    r0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_heads, head_dim, head_dim})
+
+    {_, _, o_list} =
+      Enum.reduce(0..(seq_len - 1), {s0, r0, []}, fn t, {s_prev, r_prev, acc} ->
+        q_t = Nx.slice_along_axis(q, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        k_t = Nx.slice_along_axis(k, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        v_t = Nx.slice_along_axis(v, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        alpha_t = Nx.slice_along_axis(alpha, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        beta_t = Nx.slice_along_axis(beta, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        gamma_t = Nx.slice_along_axis(gamma, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+        # Gates are [B, H, 1, 1] (per-head scalar, broadcastable to [B, H, d, d])
+        # alpha/beta/gamma already shaped for broadcasting
+
+        # Retrieval from base state: S @ k
+        retrieval_s =
+          Nx.dot(s_prev, [3], [0, 1], Nx.new_axis(k_t, -1), [2], [0, 1])
+          |> Nx.squeeze(axes: [-1])
+
+        # Residual error: clip(v - retrieval)
+        raw_error = Nx.subtract(v_t, retrieval_s)
+        r_error = Nx.clip(raw_error, -clip_threshold, clip_threshold)
+
+        {s_t, r_t} =
+          case variant do
+            :rla ->
+              # S_t = alpha * S + beta * outer(v, k)
+              s_decayed = Nx.multiply(alpha_t, s_prev)
+              vk = Nx.multiply(Nx.new_axis(v_t, -1), Nx.new_axis(k_t, -2))
+              s_new = Nx.add(s_decayed, Nx.multiply(beta_t, vk))
+
+              # R_t = alpha * R + gamma * outer(r_error, k)
+              r_decayed = Nx.multiply(alpha_t, r_prev)
+              rk = Nx.multiply(Nx.new_axis(r_error, -1), Nx.new_axis(k_t, -2))
+              r_new = Nx.add(r_decayed, Nx.multiply(gamma_t, rk))
+
+              {s_new, r_new}
+
+            :rdn ->
+              # S_t = alpha * S + beta * outer(v - S@k, k)
+              s_decayed = Nx.multiply(alpha_t, s_prev)
+              delta_s = Nx.subtract(v_t, retrieval_s)
+              s_outer = Nx.multiply(Nx.new_axis(delta_s, -1), Nx.new_axis(k_t, -2))
+              s_new = Nx.add(s_decayed, Nx.multiply(beta_t, s_outer))
+
+              # R_t = alpha * R + gamma * outer(r_error - R@k, k)
+              retrieval_r =
+                Nx.dot(r_prev, [3], [0, 1], Nx.new_axis(k_t, -1), [2], [0, 1])
+                |> Nx.squeeze(axes: [-1])
+              r_decayed = Nx.multiply(alpha_t, r_prev)
+              delta_r = Nx.subtract(r_error, retrieval_r)
+              r_outer = Nx.multiply(Nx.new_axis(delta_r, -1), Nx.new_axis(k_t, -2))
+              r_new = Nx.add(r_decayed, Nx.multiply(gamma_t, r_outer))
+
+              {s_new, r_new}
           end
 
-        for t <- 0..(seq_len - 1) do
-          for hi <- 0..(hidden - 1) do
-            Enum.at(Enum.at(per_hidden, hi), t)
-          end
-        end
-      end
+        # Output: (S + R) @ q
+        sr = Nx.add(s_t, r_t)
+        o_t = Nx.dot(sr, [3], [0, 1], Nx.new_axis(q_t, -1), [2], [0, 1])
+              |> Nx.squeeze(axes: [-1])
+        {s_t, r_t, [o_t | acc]}
+      end)
 
-    results |> List.flatten() |> Nx.tensor(type: :f32) |> Nx.reshape({batch, seq_len, hidden})
+    o_list |> Enum.reverse() |> Nx.stack(axis: 1)
   end
 
   # ============================================================================
@@ -1072,6 +1225,180 @@ defmodule Edifice.CUDA.FusedScan do
 
       {:error, reason} ->
         raise "CUDA fused DeltaProduct scan failed: #{reason}"
+    end
+  end
+
+  # ============================================================================
+  # sLSTM / TTT / Mamba fused paths (graph-breaking NIF)
+  # ============================================================================
+
+  defp slstm_fused(wx, recurrent_weight) do
+    {batch, seq_len, hidden4} = Nx.shape(wx)
+    hidden = div(hidden4, 4)
+
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}, backend: backend_for(wx)), {batch, hidden})
+    c0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}, backend: backend_for(wx)), {batch, hidden})
+
+    wx_ptr = Nx.to_pointer(wx, mode: :local)
+    r_ptr = Nx.to_pointer(recurrent_weight, mode: :local)
+    h0_ptr = Nx.to_pointer(h0, mode: :local)
+    c0_ptr = Nx.to_pointer(c0, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_slstm_scan(
+           wx_ptr.address, r_ptr.address, h0_ptr.address, c0_ptr.address,
+           batch, seq_len, hidden
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * hidden * 4
+
+        Nx.from_pointer(
+          {backend_for(wx), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, hidden}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused sLSTM scan failed: #{reason}"
+    end
+  end
+
+  defp ttt_fused(q, k, v, eta, w0, ln_gamma, ln_beta) do
+    {batch, seq_len, inner_size} = Nx.shape(q)
+
+    # Broadcast W0 to [batch, inner_size, inner_size] if needed
+    w0_batched =
+      if Nx.rank(w0) == 2 do
+        Nx.broadcast(w0, {batch, inner_size, inner_size})
+      else
+        w0
+      end
+
+    q_ptr = Nx.to_pointer(q, mode: :local)
+    k_ptr = Nx.to_pointer(k, mode: :local)
+    v_ptr = Nx.to_pointer(v, mode: :local)
+    eta_ptr = Nx.to_pointer(eta, mode: :local)
+    w0_ptr = Nx.to_pointer(w0_batched, mode: :local)
+    lng_ptr = Nx.to_pointer(ln_gamma, mode: :local)
+    lnb_ptr = Nx.to_pointer(ln_beta, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_ttt_scan(
+           q_ptr.address, k_ptr.address, v_ptr.address, eta_ptr.address,
+           w0_ptr.address, lng_ptr.address, lnb_ptr.address,
+           batch, seq_len, inner_size
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * inner_size * 4
+
+        Nx.from_pointer(
+          {backend_for(q), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, inner_size}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused TTT scan failed: #{reason}"
+    end
+  end
+
+  defp selective_scan_fused(x, dt, a, b, c) do
+    {batch, seq_len, hidden} = Nx.shape(x)
+    {_h, state} = Nx.shape(a)
+
+    x_ptr = Nx.to_pointer(x, mode: :local)
+    dt_ptr = Nx.to_pointer(dt, mode: :local)
+    a_ptr = Nx.to_pointer(a, mode: :local)
+    b_ptr = Nx.to_pointer(b, mode: :local)
+    c_ptr = Nx.to_pointer(c, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_selective_scan(
+           x_ptr.address, dt_ptr.address, a_ptr.address,
+           b_ptr.address, c_ptr.address,
+           batch, seq_len, hidden, state
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * hidden * 4
+
+        Nx.from_pointer(
+          {backend_for(x), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, hidden}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused selective scan failed: #{reason}"
+    end
+  end
+
+  # ============================================================================
+  # KDA / RLA fused paths (graph-breaking NIF)
+  # ============================================================================
+
+  defp kda_fused(q, k, v, alpha, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+
+    q_ptr = Nx.to_pointer(q, mode: :local)
+    k_ptr = Nx.to_pointer(k, mode: :local)
+    v_ptr = Nx.to_pointer(v, mode: :local)
+    alpha_ptr = Nx.to_pointer(alpha, mode: :local)
+    beta_ptr = Nx.to_pointer(beta, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_kda_scan(
+           q_ptr.address, k_ptr.address, v_ptr.address,
+           alpha_ptr.address, beta_ptr.address,
+           batch, seq_len, num_heads, head_dim
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * num_heads * head_dim * 4
+
+        Nx.from_pointer(
+          {backend_for(q), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, num_heads, head_dim}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused KDA scan failed: #{reason}"
+    end
+  end
+
+  defp rla_fused(q, k, v, alpha, beta, gamma, variant, clip_threshold) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+    variant_int = if variant == :rdn, do: 1, else: 0
+
+    q_ptr = Nx.to_pointer(q, mode: :local)
+    k_ptr = Nx.to_pointer(k, mode: :local)
+    v_ptr = Nx.to_pointer(v, mode: :local)
+    alpha_ptr = Nx.to_pointer(alpha, mode: :local)
+    beta_ptr = Nx.to_pointer(beta, mode: :local)
+    gamma_ptr = Nx.to_pointer(gamma, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_rla_scan(
+           q_ptr.address, k_ptr.address, v_ptr.address,
+           alpha_ptr.address, beta_ptr.address, gamma_ptr.address,
+           batch, seq_len, num_heads, head_dim,
+           variant_int, clip_threshold * 1.0
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * num_heads * head_dim * 4
+
+        Nx.from_pointer(
+          {backend_for(q), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, num_heads, head_dim}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused RLA scan failed: #{reason}"
     end
   end
 

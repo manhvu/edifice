@@ -40,7 +40,9 @@ endif
 KERNEL_SOURCES := fused_mingru_scan.cu fused_minlstm_scan.cu \
                   fused_native_rec_scan.cu fused_liquid_scan.cu \
                   fused_linear_scan.cu fused_delta_rule_scan.cu \
-                  fused_delta_product_scan.cu
+                  fused_delta_product_scan.cu fused_slstm_scan.cu \
+                  fused_ttt_scan.cu fused_selective_scan.cu \
+                  fused_kda_scan.cu fused_rla_scan.cu
 KERNEL_OBJECTS := $(patsubst %.cu,$(OBJ_DIR)/%.o,$(KERNEL_SOURCES))
 
 # All sources for syntax checking

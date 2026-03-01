@@ -285,129 +285,21 @@ defmodule Edifice.Attention.RLA do
     beta = Nx.sigmoid(Nx.reshape(beta_pre, {batch_size, seq_len, num_heads, head_dim}))
     gamma = Nx.sigmoid(Nx.reshape(gamma_pre, {batch_size, seq_len, num_heads, head_dim}))
 
-    # Initialize dual state: S (base) and R (residual)
-    # Both are [batch, num_heads, head_dim, head_dim]
-    s_init = Nx.broadcast(0.0, {batch_size, num_heads, head_dim, head_dim})
-    r_init = Nx.broadcast(0.0, {batch_size, num_heads, head_dim, head_dim})
+    # Reduce gates to per-head scalars: [B, T, H, d] -> [B, T, H, 1, 1]
+    alpha_scalar = reduce_gate_to_scalar(alpha)
+    beta_scalar = reduce_gate_to_scalar(beta)
+    gamma_scalar = reduce_gate_to_scalar(gamma)
 
-    # Sequential scan with dual-state recurrence
-    {_, _, output_list} =
-      Enum.reduce(0..(seq_len - 1), {s_init, r_init, []}, fn t, {s_prev, r_prev, acc} ->
-        # Extract timestep t: [batch, num_heads, head_dim]
-        q_t = Nx.slice_along_axis(q_all, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        k_t = Nx.slice_along_axis(k_all, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        v_t = Nx.slice_along_axis(v_all, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        alpha_t = Nx.slice_along_axis(alpha, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        beta_t = Nx.slice_along_axis(beta, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        gamma_t = Nx.slice_along_axis(gamma, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+    # Fused RLA scan via CUDA dispatch (3-tier: custom call -> NIF -> Elixir)
+    # Returns [B, T, H, d]
+    scan_output =
+      Edifice.CUDA.FusedScan.rla_scan(
+        q_all, k_all, v_all, alpha_scalar, beta_scalar, gamma_scalar,
+        variant: variant, clip_threshold: clip_threshold
+      )
 
-        # Reduce gates to per-head scalars: [batch, num_heads, 1, 1]
-        alpha_scalar = gate_to_scalar(alpha_t)
-        beta_scalar = gate_to_scalar(beta_t)
-        gamma_scalar = gate_to_scalar(gamma_t)
-
-        # Bundle gates for cleaner function signatures
-        gates = {alpha_scalar, beta_scalar, gamma_scalar}
-
-        # Compute state updates based on variant
-        {s_t, r_t} =
-          case variant do
-            :rla -> rla_update(s_prev, r_prev, k_t, v_t, gates, clip_threshold)
-            :rdn -> rdn_update(s_prev, r_prev, k_t, v_t, gates, clip_threshold)
-          end
-
-        # Output: (S + R) @ q per head: [batch, num_heads, head_dim]
-        sr = Nx.add(s_t, r_t)
-
-        o_t =
-          Nx.dot(sr, [3], [0, 1], Nx.new_axis(q_t, 3), [2], [0, 1])
-          |> Nx.squeeze(axes: [3])
-
-        # Flatten heads: [batch, num_heads * head_dim]
-        o_flat = Nx.reshape(o_t, {batch_size, num_heads * head_dim})
-
-        {s_t, r_t, [o_flat | acc]}
-      end)
-
-    # [batch, seq_len, hidden_size]
-    output_list |> Enum.reverse() |> Nx.stack(axis: 1)
-  end
-
-  # ============================================================================
-  # RLA variant: moving average + residual error tracking
-  # ============================================================================
-
-  defp rla_update(
-         s_prev,
-         r_prev,
-         k_t,
-         v_t,
-         {alpha_scalar, beta_scalar, gamma_scalar},
-         clip_threshold
-       ) do
-    # Retrieval from base state: S @ k -> [batch, num_heads, head_dim]
-    retrieval =
-      Nx.dot(s_prev, [3], [0, 1], Nx.new_axis(k_t, 3), [2], [0, 1])
-      |> Nx.squeeze(axes: [3])
-
-    # Residual error: clip(v - retrieval)
-    raw_error = Nx.subtract(v_t, retrieval)
-    r_error = Nx.clip(raw_error, -clip_threshold, clip_threshold)
-
-    # S_t = alpha * S_{t-1} + beta * outer(v_t, k_t)
-    s_decayed = Nx.multiply(alpha_scalar, s_prev)
-    vk_outer = Nx.multiply(Nx.new_axis(v_t, 3), Nx.new_axis(k_t, 2))
-    s_update = Nx.multiply(beta_scalar, vk_outer)
-    s_t = Nx.add(s_decayed, s_update)
-
-    # R_t = alpha * R_{t-1} + gamma * outer(r_error, k_t)
-    r_decayed = Nx.multiply(alpha_scalar, r_prev)
-    rk_outer = Nx.multiply(Nx.new_axis(r_error, 3), Nx.new_axis(k_t, 2))
-    r_update = Nx.multiply(gamma_scalar, rk_outer)
-    r_t = Nx.add(r_decayed, r_update)
-
-    {s_t, r_t}
-  end
-
-  # ============================================================================
-  # RDN variant: delta-rule corrections on both states
-  # ============================================================================
-
-  defp rdn_update(
-         s_prev,
-         r_prev,
-         k_t,
-         v_t,
-         {alpha_scalar, beta_scalar, gamma_scalar},
-         clip_threshold
-       ) do
-    # Retrieval from base state: S @ k -> [batch, num_heads, head_dim]
-    retrieval_s =
-      Nx.dot(s_prev, [3], [0, 1], Nx.new_axis(k_t, 3), [2], [0, 1])
-      |> Nx.squeeze(axes: [3])
-
-    # Retrieval from residual state: R @ k -> [batch, num_heads, head_dim]
-    retrieval_r =
-      Nx.dot(r_prev, [3], [0, 1], Nx.new_axis(k_t, 3), [2], [0, 1])
-      |> Nx.squeeze(axes: [3])
-
-    # Residual error: clip(v - retrieval_s)
-    raw_error = Nx.subtract(v_t, retrieval_s)
-    r_error = Nx.clip(raw_error, -clip_threshold, clip_threshold)
-
-    # S_t = alpha * S_{t-1} + beta * outer(v - S@k, k)  (delta rule)
-    s_decayed = Nx.multiply(alpha_scalar, s_prev)
-    delta_s = Nx.subtract(v_t, retrieval_s)
-    s_outer = Nx.multiply(Nx.new_axis(delta_s, 3), Nx.new_axis(k_t, 2))
-    s_t = Nx.add(s_decayed, Nx.multiply(beta_scalar, s_outer))
-
-    # R_t = alpha * R_{t-1} + gamma * outer(r_error - R@k, k)  (delta rule on residual)
-    r_decayed = Nx.multiply(alpha_scalar, r_prev)
-    delta_r = Nx.subtract(r_error, retrieval_r)
-    r_outer = Nx.multiply(Nx.new_axis(delta_r, 3), Nx.new_axis(k_t, 2))
-    r_t = Nx.add(r_decayed, Nx.multiply(gamma_scalar, r_outer))
-
-    {s_t, r_t}
+    # Flatten heads: [batch, seq_len, num_heads * head_dim]
+    Nx.reshape(scan_output, {batch_size, seq_len, num_heads * head_dim})
   end
 
   # ============================================================================
@@ -426,11 +318,11 @@ defmodule Edifice.Attention.RLA do
     Nx.divide(activated, norm)
   end
 
-  # Reduce per-head-dim gate to scalar per head: [B, H, d] -> [B, H, 1, 1]
-  defp gate_to_scalar(gate_t) do
-    Nx.mean(gate_t, axes: [2])
-    |> Nx.new_axis(2)
+  # Reduce per-head-dim gate to scalar per head (full sequence): [B, T, H, d] -> [B, T, H, 1, 1]
+  defp reduce_gate_to_scalar(gate) do
+    Nx.mean(gate, axes: [3])
     |> Nx.new_axis(3)
+    |> Nx.new_axis(4)
   end
 
   defp maybe_dropout(x, rate, _name) when rate <= 0, do: x

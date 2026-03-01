@@ -62,4 +62,24 @@ defmodule Edifice.CUDA.NIF do
   @doc false
   def fused_delta_product_scan(_q, _k, _v, _beta, _batch, _seq, _n_h, _heads, _head_dim),
     do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_slstm_scan(_wx, _r, _h0, _c0, _batch, _seq, _hidden),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_ttt_scan(_q, _k, _v, _eta, _w0, _lng, _lnb, _batch, _seq, _inner),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_selective_scan(_x, _dt, _a, _b, _c, _batch, _seq, _hidden, _state),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_kda_scan(_q, _k, _v, _alpha, _beta, _batch, _seq, _heads, _head_dim),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_rla_scan(_q, _k, _v, _alpha, _beta, _gamma, _batch, _seq, _heads, _head_dim, _variant, _clip),
+    do: :erlang.nif_error(:not_loaded)
 end

@@ -311,55 +311,13 @@ defmodule Edifice.Attention.KDA do
     # Output gate: sigmoid (not SiLU — validated by KDA ablation)
     gate = Nx.sigmoid(gate_pre)
 
-    # Initialize state: [batch, num_heads, head_dim, head_dim]
-    s_init = Nx.broadcast(Nx.tensor(0.0, type: :f32), {batch_size, num_heads, head_dim, head_dim})
+    # Fused KDA scan via CUDA dispatch (3-tier: custom call -> NIF -> Elixir)
+    # alpha_log: [B, T, H, d] (log-space), beta: [B, T, H]
+    # FusedScan.kda_scan returns [B, T, H, d]
+    scan_output = Edifice.CUDA.FusedScan.kda_scan(q_all, k_all, v_all, alpha_log, beta)
 
-    # Sequential KDA scan
-    {_, output_list} =
-      Enum.reduce(0..(seq_len - 1), {s_init, []}, fn t, {s_prev, acc} ->
-        q_t = Nx.slice_along_axis(q_all, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        k_t = Nx.slice_along_axis(k_all, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        v_t = Nx.slice_along_axis(v_all, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        alpha_t = Nx.slice_along_axis(alpha_log, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-        beta_t = Nx.slice_along_axis(beta, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-
-        # Channel-wise decay: exp(alpha_log) per channel
-        # alpha_t: [batch, num_heads, head_dim] -> broadcast to [batch, heads, d_k, d_v]
-        decay = Nx.exp(alpha_t) |> Nx.new_axis(3)
-        s_decayed = Nx.multiply(decay, s_prev)
-
-        # Delta rule update: S = (I - beta * k k^T) * decayed_S + beta * k v^T
-        # beta_t: [batch, num_heads] -> [batch, num_heads, 1, 1]
-        beta_bc = beta_t |> Nx.new_axis(2) |> Nx.new_axis(3)
-
-        # (I - beta * k k^T) * S: erase old value for key k_t before writing new
-        # S @ k: [batch, heads, d_v] (what k_t currently retrieves)
-        sk =
-          Nx.dot(s_decayed, [2], [0, 1], Nx.new_axis(k_t, 3), [2], [0, 1])
-          |> Nx.squeeze(axes: [3])
-
-        # correction = beta * k * (k^T S)^T = beta * outer(k, S^T k)
-        erase = Nx.multiply(beta_bc, Nx.multiply(Nx.new_axis(k_t, 3), Nx.new_axis(sk, 2)))
-
-        s_after_erase = Nx.subtract(s_decayed, erase)
-
-        # Add: beta * k v^T
-        kv = Nx.multiply(Nx.new_axis(k_t, 3), Nx.new_axis(v_t, 2))
-        s_t = Nx.add(s_after_erase, Nx.multiply(beta_bc, kv))
-
-        # Output: h_t = S_t^T @ q_t
-        o_t =
-          Nx.dot(s_t, [2], [0, 1], Nx.new_axis(q_t, 3), [2], [0, 1])
-          |> Nx.squeeze(axes: [3])
-
-        # Flatten heads: [batch, num_heads * head_dim]
-        o_flat = Nx.reshape(o_t, {batch_size, num_heads * head_dim})
-
-        {s_t, [o_flat | acc]}
-      end)
-
-    # Stack outputs: [batch, seq_len, hidden_size]
-    raw_output = output_list |> Enum.reverse() |> Nx.stack(axis: 1)
+    # Flatten heads: [batch, seq_len, num_heads * head_dim]
+    raw_output = Nx.reshape(scan_output, {batch_size, seq_len, num_heads * head_dim})
 
     # Apply RMSNorm + sigmoid gate
     normed = rms_norm(raw_output)

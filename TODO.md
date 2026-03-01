@@ -238,16 +238,16 @@ transformation between PyTorch and Axon conventions.
 
 **Phase 1 — Core infrastructure (`lib/edifice/pretrained/`):**
 
-- [ ] **Add `{:safetensors, "~> 0.1.3"}` dependency** — Add to `mix.exs` as optional dep. Zero runtime cost for users who don't load weights.
-- [ ] **Key mapping behaviour** — `Edifice.Pretrained.KeyMap` behaviour with `@callback map_key(pytorch_key :: String.t()) :: String.t() | :skip`. Each architecture implements this to translate PyTorch param names (e.g. `model.layers.0.self_attn.q_proj.weight`) to Axon layer names. Include `@callback tensor_transforms() :: [{String.t(), (Nx.Tensor.t() -> Nx.Tensor.t())}]` for per-key reshape/transpose rules.
-- [ ] **Tensor transformation layer** — `Edifice.Pretrained.Transform` module. Handles: (1) Linear weight transpose (`[out, in]` PyTorch -> `[in, out]` Axon), (2) Conv weight permutation (PyTorch OIHW -> Axon format), (3) Dtype casting (fp16/bf16 -> f32 or preserve), (4) Nested key grouping (flat `"layer.0.weight"` -> `%{"layer" => %{"0" => %{"weight" => tensor}}}`).
-- [ ] **Loader API** — `Edifice.Pretrained.load(module, path_or_url, opts)` that: (1) Reads `.safetensors` file via `Safetensors.read!/2` with lazy loading, (2) Applies module's key mapping, (3) Applies tensor transforms, (4) Returns `Axon.ModelState.t()`. Options: `:backend` (default BinaryBackend), `:dtype` (cast all to given type), `:strict` (error on unmapped keys vs warn).
+- [x] **Add `{:safetensors, "~> 0.1.3"}` dependency** — Add to `mix.exs` as optional dep. Zero runtime cost for users who don't load weights.
+- [x] **Key mapping behaviour** — `Edifice.Pretrained.KeyMap` behaviour with `@callback map_key(pytorch_key :: String.t()) :: String.t() | :skip`. Each architecture implements this to translate PyTorch param names (e.g. `model.layers.0.self_attn.q_proj.weight`) to Axon layer names. Include `@callback tensor_transforms() :: [{String.t(), (Nx.Tensor.t() -> Nx.Tensor.t())}]` for per-key reshape/transpose rules.
+- [x] **Tensor transformation layer** — `Edifice.Pretrained.Transform` module. Handles: (1) Linear weight transpose (`[out, in]` PyTorch -> `[in, out]` Axon), (2) Conv weight permutation (PyTorch OIHW -> Axon format), (3) Dtype casting (fp16/bf16 -> f32 or preserve), (4) Nested key grouping (flat `"layer.0.weight"` -> `%{"layer" => %{"0" => %{"weight" => tensor}}}`).
+- [x] **Loader API** — `Edifice.Pretrained.load(module, path_or_url, opts)` that: (1) Reads `.safetensors` file via `Safetensors.read!/2` with lazy loading, (2) Applies module's key mapping, (3) Applies tensor transforms, (4) Returns `Axon.ModelState.t()`. Options: `:backend` (default BinaryBackend), `:dtype` (cast all to given type), `:strict` (error on unmapped keys vs warn).
 
 **Phase 2 — Reference architecture key maps (2-3 models):**
 
-- [ ] **ViT key map** — `Edifice.Vision.ViT.KeyMap`. Map from HuggingFace `vit-base-patch16-224` checkpoint. Covers patch embedding, positional embedding, transformer encoder layers, layernorm, classifier head. Test with `google/vit-base-patch16-224` (~86M params, 330MB safetensors).
-- [ ] **Whisper key map** — `Edifice.Audio.Whisper.KeyMap`. Map from HuggingFace `whisper-tiny` checkpoint. Covers: mel encoder conv layers, encoder transformer, decoder transformer, cross-attention projections. Test with `openai/whisper-tiny` (~39M params, 151MB safetensors). Exercises encoder-decoder architecture.
-- [ ] **ConvNeXt key map** (stretch) — `Edifice.Vision.ConvNeXt.KeyMap`. Map from `facebook/convnext-tiny-224`. Exercises a pure-CNN architecture with depthwise convs, LayerNorm, different param naming patterns from transformers.
+- [x] **ViT key map** — `Edifice.Pretrained.KeyMaps.ViT`. Map from HuggingFace `vit-base-patch16-224` checkpoint. Covers patch embedding, positional embedding, transformer encoder layers, layernorm, classifier head. Includes `concat_keys/0` for QKV concatenation.
+- [x] **Whisper key map** — `Edifice.Pretrained.KeyMaps.Whisper`. Map from HuggingFace `whisper-base` checkpoint. Covers: mel encoder conv layers, encoder transformer, decoder transformer, cross-attention projections. Handles 0-based→1-based index shift.
+- [x] **ConvNeXt key map** (stretch) — `Edifice.Pretrained.KeyMaps.ConvNeXt`. Map from `facebook/convnext-tiny-224`. Exercises a pure-CNN architecture with depthwise convs, LayerNorm, different param naming patterns from transformers.
 
 **Phase 3 — HuggingFace Hub integration (optional):**
 

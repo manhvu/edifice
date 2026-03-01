@@ -101,10 +101,16 @@ defmodule Edifice.Meta.ReMoE do
 
     input = Axon.input("remoe_input", shape: {nil, nil, input_size})
 
-    # ReLU router: R(x) = ReLU(W_r * x) -> {batch, seq_len, num_experts}
+    # ReLU router: R(x) = ReLU(W_r * x + b) -> {batch, seq_len, num_experts}
+    # Bias initialized to small positive value so ReLU doesn't zero-out all
+    # experts at initialization (which would block gradient flow entirely).
     router_weights =
       input
-      |> Axon.dense(num_experts, name: "#{name}_router")
+      |> Axon.dense(num_experts,
+        name: "#{name}_router",
+        kernel_initializer: :glorot_uniform,
+        bias_initializer: Axon.Initializers.full(0.1)
+      )
       |> Axon.relu(name: "#{name}_router_relu")
 
     # Build expert FFNs

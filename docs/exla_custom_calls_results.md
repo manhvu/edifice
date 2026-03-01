@@ -3,62 +3,73 @@
 ## Summary
 
 Fused CUDA scan kernels (MinGRU, MinLSTM) are now registered as XLA custom calls
-inside an EXLA fork. When called from a single `defn` compilation unit, the
-kernels stay inside the XLA computation graph with zero graph breaks. XLA manages
-buffers, streams, and optimization around them.
+inside an EXLA fork. When called with `compiler: EXLA`, the kernels stay inside
+the XLA computation graph with zero graph breaks and the compiled graph is cached
+across calls.
 
-**Key result:** 2-layer MinGRU drops from ~349ms (Axon) to **2.6ms** (single defn) — a 135x speedup. The scan kernel itself runs in 0.3ms.
+**Key result:** 2-layer MinGRU drops from ~361ms to **3.7ms** with
+`Axon.build(model, compiler: EXLA)` — a **97x speedup**. The scan kernel
+itself runs in 0.3ms.
 
 ## Benchmark Results (NVIDIA T400, B=1 T=32 H=256)
 
-### Single defn (custom call working, zero graph breaks)
+### Direct defn baselines (no Axon)
 
 | Configuration | Min | Median |
 |---|---|---|
-| Scan alone (direct defn) | 0.28ms | 0.36ms |
-| Dense+Dense+Scan (1 layer, single defn) | 1.35ms | 2.51ms |
-| 2-layer MinGRU (single defn) | 1.46ms | 2.59ms |
+| Scan alone (custom call, direct defn) | 0.24ms | 0.29ms |
+| Dense+Dense+Scan (1 layer, single defn) | 0.54ms | 2.58ms |
 
-### Through Axon.layer (graph breaks at each layer boundary)
+### Axon WITHOUT `compiler: EXLA` (re-traces every call)
 
 | Configuration | Min | Median |
 |---|---|---|
-| Dense+Dense+Scan (1 layer, Axon.layer) | 48ms | 62ms |
-| Full MinGRU (1 layer, Axon) | 126ms | 172ms |
-| Full MinGRU (2 layers, Axon) | 275ms | 349ms |
+| MinGRU 1L | 138ms | 208ms |
+| MinGRU 2L | 274ms | 361ms |
 
-### What the overhead is
+### Axon WITH `compiler: EXLA` (graph cached)
 
-| Source | Cost |
-|---|---|
-| Axon per-layer JIT boundary | ~25x overhead (2.5ms → 62ms) |
-| Scan kernel execution | 0.3ms |
-| Dense projections (XLA fused) | ~2ms |
+| Configuration | Min | Median |
+|---|---|---|
+| MinGRU 1L | 1.59ms | 3.64ms |
+| MinGRU 2L | 2.51ms | 3.66ms |
 
-## Why Axon is slow
+## Root cause of the Axon overhead
 
-Axon compiles each `Axon.layer` callback as a **separate XLA computation**. For a
-2-layer MinGRU with LayerNorm, this means 6+ independent compilations:
+Without `compiler: EXLA`, Axon's `predict_fn` **re-invokes every layer callback
+on every call**. This means:
 
+1. The `FusedScan.mingru` dispatch runs again (checking `custom_call_available?`)
+2. `Nx.Shared.optional` builds a new `:optional` Expr node
+3. EXLA recompiles/re-matches the XLA graph from scratch
+
+We confirmed this with a counter inside the callback — it incremented on every
+`predict_fn.(params, input)` call, not just the first.
+
+With `compiler: EXLA`, `Axon.build` wraps `predict_fn` in `Nx.Defn.jit(...,
+compiler: EXLA)`. EXLA caches the compiled XLA executable keyed by the expression
+tree shape, so subsequent calls skip graph building entirely and dispatch directly
+to the cached GPU executable.
+
+## The fix: `compiler: EXLA`
+
+```elixir
+# SLOW — re-traces every call (~360ms for 2-layer MinGRU)
+{init_fn, predict_fn} = Axon.build(model)
+
+# FAST — compiles once, caches (~3.7ms for 2-layer MinGRU)
+{init_fn, predict_fn} = Axon.build(model, compiler: EXLA)
 ```
-[LN₁] → break → [Dense_gate₁ + Dense_cand₁] → break → [Scan₁] → break →
-[LN₂] → break → [Dense_gate₂ + Dense_cand₂] → break → [Scan₂] → break
-```
 
-Each break requires:
-1. Finishing the current XLA computation
-2. Transferring results back to the Elixir runtime
-3. Starting a new XLA computation with the results as inputs
-4. Re-uploading parameters
+This is a standard Axon option — no fork needed. The `compiler:` option tells
+Axon to JIT-compile the predict_fn with that compiler, enabling caching.
 
-This overhead (~25ms per break on T400) dominates the actual computation.
-
-## The custom calls work correctly
+## Custom call pipeline (verified working)
 
 The `Nx.Shared.optional` → EXLA `cached_recur_operator` → `stablehlo.custom_call`
 pipeline works exactly as designed:
 
-- `custom_call_available?()` detects the EXLA fork at compile time
+- `custom_call_available?()` detects the EXLA fork at graph-build time
 - In defn context, `Nx.Shared.optional(:fused_mingru_scan, ...)` creates an
   `:optional` Expr node
 - EXLA's `cached_recur_operator` pattern-matches on `:fused_mingru_scan` +
@@ -66,33 +77,26 @@ pipeline works exactly as designed:
 - The CUDA kernel runs inside the XLA graph with no breaks
 - On non-CUDA platforms, the Elixir fallback runs normally
 
-Verification: `Nx.Defn.jit(fn g, c -> FusedScan.mingru(g, c) end, compiler: EXLA)`
-produces 0.3ms execution — identical to raw kernel launch overhead.
-
-## Next step: Axon graph fusion
-
-The custom calls eliminate graph breaks **within** the scan, but Axon still
-creates graph breaks **between** layers. To realize the full 135x speedup in
-Axon models, Axon needs to compile multiple layers into a single XLA computation.
-
-See `docs/axon_graph_fusion.md` for analysis of potential Axon fork approaches.
-
 ## Build notes
+
+### EXLA fork activation
+
+The fork is gated behind an env var in `mix.exs`:
+
+```elixir
+# Set EDIFICE_LOCAL_NX=1 to use local nx/exla forks
+local_nx? = System.get_env("EDIFICE_LOCAL_NX") == "1"
+```
+
+Without it, Edifice uses hex versions and custom calls are unavailable (falls
+through to NIF or Elixir fallback — still correct, just slower).
 
 ### EXLA fork changes (`/home/nixos/nx/exla/`)
 
 - `Makefile`: Added `-DEXLA_FFI` to NVCCFLAGS
-- `c_src/exla/custom_calls/fused_mingru_scan.cu`: Copied from Edifice
-- `c_src/exla/custom_calls/fused_minlstm_scan.cu`: Copied from Edifice
-- `lib/exla/mlir/value.ex`: `fused_mingru_scan/4`, `fused_minlstm_scan/5`
-- `lib/exla/defn.ex`: Two `cached_recur_operator(:optional)` clauses for `:cuda`
-
-### Edifice changes
-
-- `mix.exs`: Points nx + exla at fork path deps
-- `lib/edifice/cuda/fused_scan.ex`: 3-tier dispatch (custom call → NIF → Elixir)
-- `native/cuda/fused_*.cu`: Removed `ffi_api.h` include (broke nvcc build)
-- `shell.nix`: Added `libstdc++` to fix segfault from missing shared lib
+- `c_src/exla/custom_calls/fused_*.cu`: All Edifice kernels copied, `ffi_api.h` removed
+- `lib/exla/mlir/value.ex`: `fused_mingru_scan/4`, `fused_minlstm_scan/5`, + 7 more
+- `lib/exla/defn.ex`: `cached_recur_operator(:optional)` clauses for `:cuda`
 
 ### Build gotcha: `xla/ffi/ffi_api.h`
 

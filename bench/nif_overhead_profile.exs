@@ -74,7 +74,7 @@ defmodule NIFOverheadProfile do
 
     # Force Elixir fallback by temporarily checking
     gru_model = Edifice.Recurrent.MinGRU.build(model_opts)
-    {init_fn, predict_fn} = Axon.build(gru_model)
+    {init_fn, predict_fn} = Axon.build(gru_model, compiler: EXLA)
     params = init_fn.(Nx.template({batch, seq_len, hidden}, :f32), Axon.ModelState.empty())
 
     # Warmup XLA compilation

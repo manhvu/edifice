@@ -72,7 +72,7 @@ defmodule ModelBreakdown do
 
     # Layer norm only
     ln_model = Axon.input("x", shape: {nil, nil, hidden}) |> Axon.layer_norm(name: "ln")
-    {ln_init, ln_pred} = Axon.build(ln_model)
+    {ln_init, ln_pred} = Axon.build(ln_model, compiler: EXLA)
     ln_params = ln_init.(%{"x" => Nx.template({batch, seq_len, hidden}, :f32)}, Axon.ModelState.empty())
     for _ <- 1..5, do: ln_pred.(ln_params, %{"x" => input})
 
@@ -80,7 +80,7 @@ defmodule ModelBreakdown do
 
     # Dense only (one projection)
     dense_model = Axon.input("x", shape: {nil, nil, hidden}) |> Axon.dense(hidden, name: "d")
-    {d_init, d_pred} = Axon.build(dense_model)
+    {d_init, d_pred} = Axon.build(dense_model, compiler: EXLA)
     d_params = d_init.(%{"x" => Nx.template({batch, seq_len, hidden}, :f32)}, Axon.ModelState.empty())
     for _ <- 1..5, do: d_pred.(d_params, %{"x" => input})
 
@@ -94,7 +94,7 @@ defmodule ModelBreakdown do
         b = Axon.dense(inp, hidden, name: "cand")
         Axon.container({a, b})
       end)
-    {td_init, td_pred} = Axon.build(two_dense_model)
+    {td_init, td_pred} = Axon.build(two_dense_model, compiler: EXLA)
     td_params = td_init.(%{"x" => Nx.template({batch, seq_len, hidden}, :f32)}, Axon.ModelState.empty())
     for _ <- 1..5, do: td_pred.(td_params, %{"x" => input})
 
@@ -109,7 +109,7 @@ defmodule ModelBreakdown do
         b = Axon.dense(normed, hidden, name: "cand")
         Axon.container({a, b})
       end)
-    {ld_init, ld_pred} = Axon.build(ln_dense_model)
+    {ld_init, ld_pred} = Axon.build(ln_dense_model, compiler: EXLA)
     ld_params = ld_init.(%{"x" => Nx.template({batch, seq_len, hidden}, :f32)}, Axon.ModelState.empty())
     for _ <- 1..5, do: ld_pred.(ld_params, %{"x" => input})
 
@@ -131,7 +131,7 @@ defmodule ModelBreakdown do
           name: "scan"
         )
       end)
-    {s_init, s_pred} = Axon.build(scan_model)
+    {s_init, s_pred} = Axon.build(scan_model, compiler: EXLA)
     s_params = s_init.(%{"x" => Nx.template({batch, seq_len, hidden}, :f32)}, Axon.ModelState.empty())
     for _ <- 1..5, do: s_pred.(s_params, %{"x" => input})
 
@@ -150,7 +150,7 @@ defmodule ModelBreakdown do
       ]
 
       model = Edifice.Recurrent.MinGRU.build(model_opts)
-      {init_fn, predict_fn} = Axon.build(model)
+      {init_fn, predict_fn} = Axon.build(model, compiler: EXLA)
       params = init_fn.(Nx.template({batch, seq_len, hidden}, :f32), Axon.ModelState.empty())
       for _ <- 1..5, do: predict_fn.(params, input)
 

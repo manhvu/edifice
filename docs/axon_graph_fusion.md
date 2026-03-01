@@ -1,162 +1,84 @@
-# Axon Graph Fusion — Analysis & Options
+# Axon Graph Fusion — Analysis & Resolution
 
-## The Problem
+## The Problem (now solved)
 
 Custom calls eliminate graph breaks **within** the fused scan kernel (0.3ms
-execution). But when used through `Axon.layer`, the 2-layer MinGRU still takes
-~349ms instead of ~2.6ms. Where are the graph breaks?
+execution). But when used through `Axon.layer` without `compiler: EXLA`, the
+2-layer MinGRU took ~361ms instead of ~3.7ms.
 
-## Investigation: How Axon Actually Compiles
+## Root Cause: Missing `compiler: EXLA` option
 
-Axon compiles the **entire** `predict_fn` as a single `Nx.Defn.jit()` call:
+Without `compiler: EXLA`, Axon's `predict_fn` **re-invokes every layer callback
+on every call**, rebuilding the entire expression graph and recompiling it through
+EXLA each time. This is not a bug in Axon — it's the expected behavior when no
+compiler is specified (the predict_fn runs in eager mode).
+
+### Evidence
+
+We placed a counter inside the `Axon.layer` callback:
 
 ```elixir
-# Axon.Loop.trainer calls Axon.build(model) which returns:
+Axon.layer(fn g, c, _opts ->
+  :counters.add(call_count, 1, 1)
+  FusedScan.mingru(g, c)
+end, [gates, cands])
+```
+
+After 3 calls to `predict_fn`, the counter was at 4 (1 from `Axon.build` graph
+construction + 3 from execution). Every call re-traces the callback.
+
+### The Fix
+
+```elixir
+# SLOW — re-traces every call (~361ms for 2-layer MinGRU)
 {init_fn, predict_fn} = Axon.build(model)
 
-# predict_fn is then JIT-compiled as one unit:
-Nx.Defn.jit(predict_fn, compiler: EXLA)
+# FAST — compiles once, caches (~3.7ms for 2-layer MinGRU)
+{init_fn, predict_fn} = Axon.build(model, compiler: EXLA)
 ```
 
-This means Axon does NOT create separate XLA computations per layer. The entire
-model graph is one defn expression tree. In theory, `Nx.Shared.optional` should
-work perfectly — it creates `:optional` Expr nodes that EXLA pattern-matches
-into `stablehlo.custom_call` ops, all within the single compilation.
+This is a standard Axon option. With `compiler: EXLA`:
+1. Axon wraps `predict_fn` in `Nx.Defn.jit(..., compiler: EXLA)`
+2. First call traces the callbacks and compiles the XLA graph
+3. Subsequent calls use the cached executable — no re-tracing
 
-## So Where Do Graph Breaks Actually Come From?
+## Final Benchmark (NVIDIA T400, B=1 T=32 H=256)
 
-The graph breaks come from **host-side sequential operations inside custom layer
-callbacks**. Specifically, the `Enum.reduce` in the Elixir scan fallback:
+| Configuration | Min | Median | Speedup |
+|---|---|---|---|
+| Direct defn (scan only) | 0.24ms | 0.29ms | baseline |
+| Direct defn (dense+scan) | 0.54ms | 2.58ms | — |
+| Axon 2L (no compiler) | 274ms | 361ms | 1x |
+| **Axon 2L (compiler: EXLA)** | **2.51ms** | **3.66ms** | **97x** |
 
-```elixir
-# This breaks the expression graph!
-Enum.reduce(0..(seq_len - 1), {h0, []}, fn t, {h_prev, acc} ->
-  z_t = Nx.slice_along_axis(z, t, 1, axis: 1)
-  h_t = Nx.add(Nx.multiply(Nx.subtract(1.0, z_t), h_prev), Nx.multiply(z_t, c_t))
-  {h_t, [h_t | acc]}
-end)
-```
+The ~1ms gap between direct defn (2.58ms) and Axon (3.66ms) is Axon's parameter
+map threading overhead — totally acceptable.
 
-`Enum.reduce` runs on the BEAM at graph-build time, unrolling the loop into N
-sequential Nx operations. For `seq_len=32`, this creates 32 slice + multiply +
-add chains. Each iteration depends on the previous result, so XLA cannot
-parallelize them. This is **by design** — it's the correct fallback for
-non-CUDA backends. But it's also why the Axon path is slow: the entire predict_fn
-is one compilation, but that compilation contains a massive unrolled loop.
+## Implications for Edifice
 
-### Wait — the custom call path should bypass the Enum.reduce
+### No Axon fork needed
 
-If `custom_call_available?()` returns `true`, the `mingru_custom_call/2` path
-runs, which calls `Nx.Shared.optional(:fused_mingru_scan, ...)`. Inside defn JIT
-on EXLA+CUDA, this should emit a custom call and skip the fallback entirely.
+The original hypothesis was that Axon creates per-layer graph breaks requiring
+a fork to fix. This was wrong. Axon compiles the entire `predict_fn` as one
+`Nx.Defn.jit()` call when given a compiler. The overhead was simply from
+re-tracing without caching.
 
-The issue is that `custom_call_available?/0` calls `Code.ensure_loaded?` and
-`function_exported?` — these are **runtime checks** that evaluate at graph-build
-time. Inside `Axon.build(model)`, the layer callbacks execute to build the
-expression graph. If the EXLA fork is installed, `custom_call_available?()` returns
-true, and the custom call path is taken. The fallback `fn z, cand, h0 -> ... end`
-is never executed.
+### Where to use `compiler: EXLA`
 
-So the 349ms result from the benchmark was actually measuring the **NIF bridge
-path** or the **full Axon overhead**, not the custom call path. The benchmark
-may not have been calling the custom call dispatch correctly through Axon.
+- **Benchmarks**: Always pass `compiler: EXLA` for accurate GPU timing
+- **Inference entry points**: Performance-critical code should pass the compiler
+- **Tests**: Keep backend-agnostic (no compiler option) so tests run on BinaryBackend
+- **Training loops**: `Axon.Loop.trainer` handles this internally via its `:compiler` option
 
-### The real overhead: Axon.Compiler, not XLA graph breaks
+### EDIFICE_LOCAL_NX env var
 
-Looking at Axon's compilation, the overhead comes from:
-1. **Axon.Compiler traversal** — builds the expression tree by calling each layer's
-   callback function, which involves pattern matching, parameter lookups, etc.
-2. **First-call JIT compilation** — EXLA compiles the full XLA HLO graph on first
-   execution. Subsequent calls use the cached executable.
-3. **Parameter threading** — Axon passes the full parameter map through each layer.
-
-For a single `Nx.Defn.jit(fn -> ... end)` that directly calls FusedScan, none of
-this overhead exists — just the XLA compilation (cached) and kernel launch.
-
-## Options for Improving Axon Performance
-
-### Option A: Verify custom calls work through Axon (likely already works)
-
-Before pursuing Axon changes, verify that the custom call path is actually being
-taken when running through Axon. The benchmark showed 2.6ms for direct defn and
-349ms through Axon — but the 349ms might be measuring first-call compilation, not
-steady-state execution.
-
-Test: Run the Axon model benchmark with a warmup pass, then time subsequent calls.
-
-### Option B: Replace Enum.reduce fallbacks with Nx.while_loop
-
-If the fallback scan is being used (custom call not available), replacing
-`Enum.reduce` with `Nx.while_loop` keeps everything as Nx expressions:
-
-```elixir
-# Instead of Enum.reduce (host-side loop):
-{h_final, output} = Nx.while_loop(
-  {h0, Nx.broadcast(0.0, {batch, seq_len, hidden}), 0},
-  fn {_, _, t} -> Nx.less(t, seq_len) end,
-  fn {h_prev, output, t} ->
-    z_t = Nx.slice_along_axis(z, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-    c_t = Nx.slice_along_axis(candidates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
-    h_t = (1 - z_t) * h_prev + z_t * c_t
-    output = Nx.put_slice(output, [0, t, 0], Nx.new_axis(h_t, 1))
-    {h_t, output, t + 1}
-  end
-)
-```
-
-This compiles to an XLA `while` loop — stays in the graph, no host round-trips.
-However, XLA's while loop is still sequential (each iteration depends on the
-previous hidden state), so it won't be faster than the unrolled version for
-small `seq_len`. The benefit is eliminating host-side overhead for large `seq_len`.
-
-### Option C: Axon fork — compile to a single XLA computation
-
-An Axon fork could:
-1. **Batch layer callbacks** — instead of calling each layer's callback during
-   `Axon.build`, collect them and compose them into a single defn function.
-2. **Eliminate parameter map threading** — pre-resolve parameter indices at build
-   time so the execution path is a flat sequence of Nx ops.
-
-This is a significant undertaking. Axon's architecture is designed around the
-layer-callback model for flexibility. Changing this affects every model.
-
-### Option D: Bypass Axon entirely for performance-critical models
-
-Write the model as a pure `defn` function:
-
-```elixir
-defn mingru_2layer(x, params) do
-  # Layer 1
-  g1 = Nx.dot(x, params.w_gate_1) |> Nx.add(params.b_gate_1)
-  c1 = Nx.dot(x, params.w_cand_1) |> Nx.add(params.b_cand_1)
-  h1 = FusedScan.mingru(g1, c1)
-
-  # Layer 2
-  g2 = Nx.dot(h1, params.w_gate_2) |> Nx.add(params.b_gate_2)
-  c2 = Nx.dot(h1, params.w_cand_2) |> Nx.add(params.b_cand_2)
-  h2 = FusedScan.mingru(g2, c2)
-
-  h2
-end
-```
-
-This gives you the full 2.6ms performance. Training requires writing a custom
-training loop with `Polaris` optimizers, but inference is straightforward.
-
-## Recommendation
-
-**Start with Option A** — the custom call path may already work through Axon with
-proper warmup. The 349ms benchmark result likely includes first-call JIT
-compilation. Steady-state Axon execution with custom calls should be much closer
-to the 2.6ms direct-defn result.
-
-If Option A confirms Axon overhead is still significant after warmup, **Option D**
-(bypass Axon) is the pragmatic choice for performance-critical inference. An Axon
-fork (Option C) is a large project with uncertain payoff — the simpler approach
-is to use Axon for model definition/training and export to pure defn for inference.
+The EXLA fork (with custom call kernels) is only active when `EDIFICE_LOCAL_NX=1`.
+Without it, Edifice uses hex versions and the three-tier dispatch falls through
+to NIF bridge or Elixir fallback — still correct, just without the in-graph
+custom call optimization.
 
 ## Files
 
-- `docs/exla_custom_calls_results.md` — benchmark data
+- `docs/exla_custom_calls_results.md` — full benchmark data
 - `lib/edifice/cuda/fused_scan.ex` — three-tier dispatch implementation
 - `bench/model_breakdown.exs` — per-layer benchmarking script

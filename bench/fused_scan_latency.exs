@@ -121,7 +121,7 @@ defmodule FusedScanBench do
 
     # MinGRU
     gru_model = Edifice.Recurrent.MinGRU.build(model_opts)
-    {init_fn, predict_fn} = Axon.build(gru_model)
+    {init_fn, predict_fn} = Axon.build(gru_model, compiler: EXLA)
     params = init_fn.(Nx.template({batch, seq_len, hidden}, :f32), Axon.ModelState.empty())
 
     # Warmup (triggers XLA compilation)
@@ -135,7 +135,7 @@ defmodule FusedScanBench do
 
     # MinLSTM
     lstm_model = Edifice.Recurrent.MinLSTM.build(model_opts)
-    {init_fn, predict_fn} = Axon.build(lstm_model)
+    {init_fn, predict_fn} = Axon.build(lstm_model, compiler: EXLA)
     params = init_fn.(Nx.template({batch, seq_len, hidden}, :f32), Axon.ModelState.empty())
 
     for _ <- 1..5, do: predict_fn.(params, input)

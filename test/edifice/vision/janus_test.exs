@@ -22,7 +22,7 @@ defmodule Edifice.Vision.JanusTest do
       {encoder, _gen_head} = Janus.build(@tiny_opts)
 
       {init_fn, predict_fn} = Axon.build(encoder)
-      params = init_fn.(Nx.template({2, 4, 16}, :f32), %{})
+      params = init_fn.(Nx.template({2, 4, 16}, :f32), Axon.ModelState.empty())
       input = Nx.iota({2, 4, 16}, type: :f32) |> Nx.divide(100)
       out = predict_fn.(params, input)
 
@@ -34,7 +34,7 @@ defmodule Edifice.Vision.JanusTest do
       {_encoder, gen_head} = Janus.build(@tiny_opts)
 
       {init_fn, predict_fn} = Axon.build(gen_head)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       input = Nx.iota({2, 8, 32}, type: :f32) |> Nx.divide(100)
       out = predict_fn.(params, input)
 
@@ -47,7 +47,7 @@ defmodule Edifice.Vision.JanusTest do
 
       # Understanding encoder
       {init_fn, predict_fn} = Axon.build(encoder)
-      params = init_fn.(Nx.template({2, 4, 16}, :f32), %{})
+      params = init_fn.(Nx.template({2, 4, 16}, :f32), Axon.ModelState.empty())
       input = Nx.iota({2, 4, 16}, type: :f32) |> Nx.divide(100)
       enc_out = predict_fn.(params, input)
 
@@ -68,7 +68,7 @@ defmodule Edifice.Vision.JanusTest do
       {encoder, gen_head} = Janus.build(@tiny_opts)
 
       {init_fn, predict_fn} = Axon.build(encoder)
-      params = init_fn.(Nx.template({1, 4, 16}, :f32), %{})
+      params = init_fn.(Nx.template({1, 4, 16}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.iota({1, 4, 16}, type: :f32) |> Nx.divide(100))
       assert Nx.shape(out) == {1, 4, 32}
 
@@ -83,7 +83,7 @@ defmodule Edifice.Vision.JanusTest do
       {encoder, gen_head} = Janus.build(opts)
 
       {init_fn, predict_fn} = Axon.build(encoder)
-      params = init_fn.(Nx.template({2, 4, 16}, :f32), %{})
+      params = init_fn.(Nx.template({2, 4, 16}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.iota({2, 4, 16}, type: :f32) |> Nx.divide(100))
       assert Nx.shape(out) == {2, 4, 48}
 
@@ -98,7 +98,7 @@ defmodule Edifice.Vision.JanusTest do
       {_encoder, gen_head} = Janus.build(opts)
 
       {init_fn, predict_fn} = Axon.build(gen_head)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.iota({2, 8, 32}, type: :f32) |> Nx.divide(100))
       assert Nx.shape(out) == {2, 8, 128}
     end
@@ -108,7 +108,7 @@ defmodule Edifice.Vision.JanusTest do
       {encoder, _gen_head} = Janus.build(opts)
 
       {init_fn, predict_fn} = Axon.build(encoder)
-      params = init_fn.(Nx.template({2, 4, 16}, :f32), %{})
+      params = init_fn.(Nx.template({2, 4, 16}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.iota({2, 4, 16}, type: :f32) |> Nx.divide(100))
       assert Nx.shape(out) == {2, 4, 32}
     end
@@ -118,7 +118,7 @@ defmodule Edifice.Vision.JanusTest do
       {encoder, _gen_head} = Janus.build(opts)
 
       {init_fn, predict_fn} = Axon.build(encoder)
-      params = init_fn.(Nx.template({2, 4, 16}, :f32), %{})
+      params = init_fn.(Nx.template({2, 4, 16}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.iota({2, 4, 16}, type: :f32) |> Nx.divide(100))
       assert Nx.shape(out) == {2, 4, 32}
     end

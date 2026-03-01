@@ -53,7 +53,7 @@ defmodule Edifice.Graph.GPSTest do
       "adjacency" => Nx.template(Nx.shape(inputs["adjacency"]), :f32)
     }
 
-    params = init_fn.(template, %{})
+    params = init_fn.(template, Axon.ModelState.empty())
     output = predict_fn.(params, inputs)
     {output, params}
   end

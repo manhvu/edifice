@@ -43,7 +43,7 @@ defmodule Edifice.Audio.F5TTSTest do
       "timestep" => Nx.tensor(for(_ <- 1..batch, do: :rand.uniform()))
     }
 
-    params = init_fn.(input, %{})
+    params = init_fn.(input, Axon.ModelState.empty())
     output = predict_fn.(params, input)
     {output, {batch, seq, mel_dim}}
   end

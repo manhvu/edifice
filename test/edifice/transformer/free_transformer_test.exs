@@ -31,7 +31,7 @@ defmodule Edifice.Transformer.FreeTransformerTest do
 
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({@batch, @seq_len, @embed_dim}, 42)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {@batch, @hidden_size}
@@ -50,7 +50,7 @@ defmodule Edifice.Transformer.FreeTransformerTest do
 
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({1, 4, 16}, 99)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {1, 16}
@@ -69,7 +69,7 @@ defmodule Edifice.Transformer.FreeTransformerTest do
 
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({@batch, @seq_len, @embed_dim}, 77)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert_finite!(output)

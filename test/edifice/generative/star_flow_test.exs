@@ -41,7 +41,7 @@ defmodule Edifice.Generative.STARFlowTest do
 
       {init_fn, predict_fn} = Axon.build(encoder)
       input = random_tensor({@batch, @seq_len, @input_size}, 42)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       result = predict_fn.(params, input)
 
       assert %{output: output, log_det: _log_det} = result
@@ -63,7 +63,7 @@ defmodule Edifice.Generative.STARFlowTest do
 
       {init_fn, predict_fn} = Axon.build(decoder)
       input = random_tensor({@batch, @seq_len, @input_size}, 99)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {@batch, @seq_len, @input_size}
@@ -83,7 +83,7 @@ defmodule Edifice.Generative.STARFlowTest do
 
       {init_fn, predict_fn} = Axon.build(encoder)
       input = random_tensor({1, @seq_len, @input_size}, 55)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       result = predict_fn.(params, input)
 
       assert %{output: output} = result

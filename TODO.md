@@ -259,7 +259,7 @@ transformation between PyTorch and Axon conventions.
 
 ### Axon.ModelState Deprecation Warnings (Priority: Medium)
 
-- [ ] **Fix `passing parameter map to initialization is deprecated, use %Axon.ModelState{}` warnings** — Tests produce hundreds of these warnings. The test helpers and/or architecture modules are passing raw parameter maps where `%Axon.ModelState{}` structs are now expected. Audit `Axon.predict/3` and `Axon.init/3` call sites in tests and helpers, wrap params in `%Axon.ModelState{}` or `Axon.ModelState.new/1`.
+- [x] **Fix `passing parameter map to initialization is deprecated, use %Axon.ModelState{}` warnings** — Replaced `init_fn.(template, %{})` with `init_fn.(template, Axon.ModelState.empty())` in 29 test files (113 occurrences). Warnings eliminated.
 
 ### cuDNN Algorithm Warning (Priority: Low)
 

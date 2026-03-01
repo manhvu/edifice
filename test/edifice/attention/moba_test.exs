@@ -33,7 +33,7 @@ defmodule Edifice.Attention.MoBATest do
     model = MoBA.build(build_opts(opts))
     {init_fn, predict_fn} = Axon.build(model)
     input = random_tensor({batch, @seq_len, @embed_dim})
-    params = init_fn.(input, %{})
+    params = init_fn.(input, Axon.ModelState.empty())
     output = predict_fn.(params, input)
     {output, params}
   end

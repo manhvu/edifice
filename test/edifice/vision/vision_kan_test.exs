@@ -35,7 +35,7 @@ defmodule Edifice.Vision.VisionKANTest do
     model = VisionKAN.build(build_opts(opts))
     {init_fn, predict_fn} = Axon.build(model)
     input = random_tensor({batch, @in_channels, @image_size, @image_size})
-    params = init_fn.(input, %{})
+    params = init_fn.(input, Axon.ModelState.empty())
     output = predict_fn.(params, input)
     {output, params}
   end
@@ -72,7 +72,7 @@ defmodule Edifice.Vision.VisionKANTest do
       model = VisionKAN.build(build_opts(opts))
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({@batch, 3, @image_size, @image_size})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
       last_dim = List.last(@channels)
       assert Nx.shape(output) == {@batch, last_dim}

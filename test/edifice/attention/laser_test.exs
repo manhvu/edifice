@@ -32,7 +32,7 @@ defmodule Edifice.Attention.LASERTest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({2, 8, 32})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {2, 16}
@@ -43,7 +43,7 @@ defmodule Edifice.Attention.LASERTest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({1, 4, 16})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert_finite!(output)
@@ -54,7 +54,7 @@ defmodule Edifice.Attention.LASERTest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({1, 4, 16})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {1, 8}
@@ -67,7 +67,7 @@ defmodule Edifice.Attention.LASERTest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({2, 4, 16})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {2, 8}
@@ -79,7 +79,7 @@ defmodule Edifice.Attention.LASERTest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({2, 4, 16})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {2, 8}

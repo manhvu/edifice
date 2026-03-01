@@ -39,7 +39,7 @@ defmodule Edifice.Robotics.DiffusionPolicyTest do
       "observations" => random_tensor({batch, to, obs_dim})
     }
 
-    params = init_fn.(input, %{})
+    params = init_fn.(input, Axon.ModelState.empty())
     output = predict_fn.(params, input)
     {output, {batch, tp, action_dim}}
   end

@@ -18,7 +18,7 @@ defmodule Edifice.Meta.VeRATest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({2, 32})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {2, 64}
@@ -29,7 +29,7 @@ defmodule Edifice.Meta.VeRATest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({1, 16})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert_finite!(output)
@@ -40,7 +40,7 @@ defmodule Edifice.Meta.VeRATest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({1, 16})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {1, 16}
@@ -51,7 +51,7 @@ defmodule Edifice.Meta.VeRATest do
       {init_fn, predict_fn} = Axon.build(model)
 
       input = random_tensor({2, 16})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       # b is initialized to zeros, so output should be near zero
@@ -77,7 +77,7 @@ defmodule Edifice.Meta.VeRATest do
       {init_fn, predict_fn} = Axon.build(adapted)
 
       input = random_tensor({2, 16})
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {2, 16}

@@ -34,7 +34,7 @@ defmodule Edifice.Contrastive.VJEPA2Test do
 
       {init_fn, predict_fn} = Axon.build(encoder)
       input = random_tensor({@batch, @num_tokens, @patch_dim}, 42)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       # Sequence output: [batch, num_tokens, embed_dim]
@@ -56,7 +56,7 @@ defmodule Edifice.Contrastive.VJEPA2Test do
       {init_fn, predict_fn} = Axon.build(predictor)
       # Predictor takes encoder output (embed_dim)
       input = random_tensor({@batch, @num_tokens, @embed_dim}, 99)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       # Projects back to embed_dim
@@ -101,7 +101,7 @@ defmodule Edifice.Contrastive.VJEPA2Test do
 
       {init_fn, predict_fn} = Axon.build(encoder)
       input = random_tensor({@batch, @num_tokens, @patch_dim}, 77)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert_finite!(output)

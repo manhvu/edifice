@@ -32,7 +32,7 @@ defmodule Edifice.Generative.JanusFlowTest do
         "text_embed" => Nx.divide(Nx.iota({2, 4, 32}, type: :f32), 256)
       }
 
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       out = predict_fn.(params, input)
       # Output should match input latent shape: [batch, H, W, latent_ch]
       assert Nx.shape(out) == {2, 8, 8, 4}
@@ -48,7 +48,7 @@ defmodule Edifice.Generative.JanusFlowTest do
         "text_embed" => Nx.divide(Nx.iota({2, 4, 32}, type: :f32), 256)
       }
 
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       out = predict_fn.(params, input)
       assert out |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
       assert out |> Nx.is_infinity() |> Nx.any() |> Nx.to_number() == 0
@@ -64,7 +64,7 @@ defmodule Edifice.Generative.JanusFlowTest do
         "text_embed" => Nx.divide(Nx.iota({1, 4, 32}, type: :f32), 128)
       }
 
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {1, 8, 8, 4}
     end
@@ -80,7 +80,7 @@ defmodule Edifice.Generative.JanusFlowTest do
         "text_embed" => Nx.divide(Nx.iota({2, 4, 32}, type: :f32), 256)
       }
 
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {2, 8, 8, 4}
     end
@@ -96,7 +96,7 @@ defmodule Edifice.Generative.JanusFlowTest do
         "text_embed" => Nx.divide(Nx.iota({2, 4, 32}, type: :f32), 256)
       }
 
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {2, 8, 8, 8}
     end

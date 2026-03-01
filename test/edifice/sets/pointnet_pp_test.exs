@@ -39,7 +39,7 @@ defmodule Edifice.Sets.PointNetPPTest do
       "points" => Nx.template(Nx.shape(inputs["points"]), :f32)
     }
 
-    params = init_fn.(template, %{})
+    params = init_fn.(template, Axon.ModelState.empty())
     output = predict_fn.(params, inputs)
     {output, params}
   end

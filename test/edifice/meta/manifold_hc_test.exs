@@ -32,7 +32,7 @@ defmodule Edifice.Meta.ManifoldHCTest do
     {init_fn, predict_fn} = Axon.build(model)
 
     template = %{"sequence" => Nx.template(Nx.shape(input), :f32)}
-    params = init_fn.(template, %{})
+    params = init_fn.(template, Axon.ModelState.empty())
     output = predict_fn.(params, %{"sequence" => input})
 
     {output, params}
@@ -86,7 +86,7 @@ defmodule Edifice.Meta.ManifoldHCTest do
       {input, _key} = Nx.Random.normal(key, shape: {1, @seq_len, 256})
 
       template = %{"sequence" => Nx.template({1, @seq_len, 256}, :f32)}
-      params = init_fn.(template, %{})
+      params = init_fn.(template, Axon.ModelState.empty())
       output = predict_fn.(params, %{"sequence" => input})
 
       assert Nx.shape(output) == {1, @seq_len, 256}

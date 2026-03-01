@@ -10,7 +10,7 @@ defmodule Edifice.Generative.MAGVIT2Test do
     test "encoder produces correct output shape" do
       {encoder, _decoder} = MAGVIT2.build(@opts)
       {init_fn, predict_fn} = Axon.build(encoder)
-      params = init_fn.(Nx.template({2, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.iota({2, 32}, type: :f32) |> Nx.divide(100))
 
       assert Nx.shape(out) == {2, 8}
@@ -19,7 +19,7 @@ defmodule Edifice.Generative.MAGVIT2Test do
     test "decoder produces correct output shape" do
       {_encoder, decoder} = MAGVIT2.build(@opts)
       {init_fn, predict_fn} = Axon.build(decoder)
-      params = init_fn.(Nx.template({2, 8}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.iota({2, 8}, type: :f32) |> Nx.divide(10))
 
       assert Nx.shape(out) == {2, 32}

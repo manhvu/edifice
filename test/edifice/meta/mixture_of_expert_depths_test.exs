@@ -18,7 +18,7 @@ defmodule Edifice.Meta.MixtureOfExpertDepthsTest do
     test "produces correct output shape" do
       model = MixtureOfExpertDepths.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       input = Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512)
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {2, 32}
@@ -27,7 +27,7 @@ defmodule Edifice.Meta.MixtureOfExpertDepthsTest do
     test "outputs are finite" do
       model = MixtureOfExpertDepths.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       input = Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512)
       out = predict_fn.(params, input)
       assert out |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
@@ -37,7 +37,7 @@ defmodule Edifice.Meta.MixtureOfExpertDepthsTest do
     test "batch=1 works" do
       model = MixtureOfExpertDepths.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({1, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({1, 8, 32}, :f32), Axon.ModelState.empty())
       input = Nx.divide(Nx.iota({1, 8, 32}, type: :f32), 256)
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {1, 32}
@@ -47,7 +47,7 @@ defmodule Edifice.Meta.MixtureOfExpertDepthsTest do
       opts = Keyword.put(@opts, :num_experts, 3)
       model = MixtureOfExpertDepths.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       input = Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512)
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {2, 32}
@@ -57,7 +57,7 @@ defmodule Edifice.Meta.MixtureOfExpertDepthsTest do
       opts = Keyword.put(@opts, :num_experts, 4)
       model = MixtureOfExpertDepths.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       input = Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512)
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {2, 32}
@@ -67,7 +67,7 @@ defmodule Edifice.Meta.MixtureOfExpertDepthsTest do
       opts = Keyword.merge(@opts, embed_dim: 24, hidden_size: 32)
       model = MixtureOfExpertDepths.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 24}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 24}, :f32), Axon.ModelState.empty())
       input = Nx.divide(Nx.iota({2, 8, 24}, type: :f32), 384)
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {2, 32}
@@ -77,7 +77,7 @@ defmodule Edifice.Meta.MixtureOfExpertDepthsTest do
       opts = Keyword.put(@opts, :expert_hidden_multiplier, 2)
       model = MixtureOfExpertDepths.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       input = Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512)
       out = predict_fn.(params, input)
       assert Nx.shape(out) == {2, 32}

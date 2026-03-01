@@ -39,7 +39,7 @@ defmodule Edifice.Audio.Wav2Vec2Test do
 
       waveform = random_waveform()
       template = %{"waveform" => Nx.template({@batch, @samples}, :f32)}
-      params = init_fn.(template, %{})
+      params = init_fn.(template, Axon.ModelState.empty())
       output = predict_fn.(params, %{"waveform" => waveform})
 
       # After CNN with total stride 320: T = floor((1600 - receptive_field) / 320) + 1
@@ -56,7 +56,7 @@ defmodule Edifice.Audio.Wav2Vec2Test do
 
       waveform = random_waveform(1)
       template = %{"waveform" => Nx.template({1, @samples}, :f32)}
-      params = init_fn.(template, %{})
+      params = init_fn.(template, Axon.ModelState.empty())
       output = predict_fn.(params, %{"waveform" => waveform})
 
       {b, _t, d} = Nx.shape(output)
@@ -72,7 +72,7 @@ defmodule Edifice.Audio.Wav2Vec2Test do
 
       waveform = random_waveform()
       template = %{"waveform" => Nx.template({@batch, @samples}, :f32)}
-      params = init_fn.(template, %{})
+      params = init_fn.(template, Axon.ModelState.empty())
       output = predict_fn.(params, %{"waveform" => waveform})
 
       {_b, _t, d} = Nx.shape(output)
@@ -87,7 +87,7 @@ defmodule Edifice.Audio.Wav2Vec2Test do
 
       waveform = random_waveform()
       template = %{"waveform" => Nx.template({@batch, @samples}, :f32)}
-      params = init_fn.(template, %{})
+      params = init_fn.(template, Axon.ModelState.empty())
       output = predict_fn.(params, %{"waveform" => waveform})
 
       assert_finite!(output)
@@ -102,7 +102,7 @@ defmodule Edifice.Audio.Wav2Vec2Test do
       key = Nx.Random.key(99)
       {cnn_features, _} = Nx.Random.normal(key, shape: {@batch, 4, 16})
       template = %{"cnn_features" => Nx.template({@batch, 4, 16}, :f32)}
-      params = init_fn.(template, %{})
+      params = init_fn.(template, Axon.ModelState.empty())
       output = predict_fn.(params, %{"cnn_features" => cnn_features})
 
       {b, t, d} = Nx.shape(output)

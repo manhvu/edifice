@@ -39,7 +39,7 @@ defmodule Edifice.Graph.KAGNNTest do
       adj = Nx.put_slice(adj, [0, 1, 0], Nx.broadcast(1.0, {1, 1, 1}))
 
       input = %{"nodes" => nodes, "adjacency" => adj}
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {@batch, @num_classes}
@@ -62,7 +62,7 @@ defmodule Edifice.Graph.KAGNNTest do
       adj = Nx.eye(4) |> Nx.new_axis(0) |> Nx.broadcast({1, 4, 4})
 
       input = %{"nodes" => nodes, "adjacency" => adj}
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {1, 2}
@@ -85,7 +85,7 @@ defmodule Edifice.Graph.KAGNNTest do
       adj = Nx.eye(@num_nodes) |> Nx.new_axis(0) |> Nx.broadcast({@batch, @num_nodes, @num_nodes})
 
       input = %{"nodes" => nodes, "adjacency" => adj}
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert_finite!(output)

@@ -21,7 +21,7 @@ defmodule Edifice.Attention.SPLATest do
     test "produces correct output shape" do
       model = SPLA.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 16, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 16, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 16, 32}, type: :f32), 1024))
       assert Nx.shape(out) == {2, 32}
     end
@@ -29,7 +29,7 @@ defmodule Edifice.Attention.SPLATest do
     test "outputs are finite" do
       model = SPLA.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 16, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 16, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 16, 32}, type: :f32), 1024))
       assert out |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
       assert out |> Nx.is_infinity() |> Nx.any() |> Nx.to_number() == 0
@@ -38,7 +38,7 @@ defmodule Edifice.Attention.SPLATest do
     test "batch=1 works" do
       model = SPLA.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({1, 16, 32}, :f32), %{})
+      params = init_fn.(Nx.template({1, 16, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({1, 16, 32}, type: :f32), 512))
       assert Nx.shape(out) == {1, 32}
     end
@@ -47,7 +47,7 @@ defmodule Edifice.Attention.SPLATest do
       opts = Keyword.merge(@opts, seq_len: 32, block_stride: 8)
       model = SPLA.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 32, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 32, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 32, 32}, type: :f32), 2048))
       assert Nx.shape(out) == {2, 32}
     end
@@ -56,7 +56,7 @@ defmodule Edifice.Attention.SPLATest do
       opts = Keyword.merge(@opts, embed_dim: 24, hidden_size: 32)
       model = SPLA.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 16, 24}, :f32), %{})
+      params = init_fn.(Nx.template({2, 16, 24}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 16, 24}, type: :f32), 768))
       assert Nx.shape(out) == {2, 32}
     end
@@ -65,7 +65,7 @@ defmodule Edifice.Attention.SPLATest do
       opts = Keyword.put(@opts, :num_layers, 1)
       model = SPLA.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 16, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 16, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 16, 32}, type: :f32), 1024))
       assert Nx.shape(out) == {2, 32}
     end
@@ -74,7 +74,7 @@ defmodule Edifice.Attention.SPLATest do
       opts = Keyword.put(@opts, :selection_ratio, 0.25)
       model = SPLA.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 16, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 16, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 16, 32}, type: :f32), 1024))
       assert Nx.shape(out) == {2, 32}
     end

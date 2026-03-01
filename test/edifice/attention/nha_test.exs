@@ -45,7 +45,7 @@ defmodule Edifice.Attention.NHATest do
 
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({@batch, @seq_len, @embed_dim}, 42)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       # ModelBuilder outputs [batch, hidden_size] from last position
@@ -64,7 +64,7 @@ defmodule Edifice.Attention.NHATest do
 
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({1, 4, 16}, 99)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {1, 16}
@@ -82,7 +82,7 @@ defmodule Edifice.Attention.NHATest do
 
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({@batch, 6, @embed_dim}, 77)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert_finite!(output)
@@ -117,7 +117,7 @@ defmodule Edifice.Attention.NHATest do
 
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({@batch, 4, 16}, 55)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {@batch, 16}
@@ -137,7 +137,7 @@ defmodule Edifice.Attention.NHATest do
 
       {init_fn, predict_fn} = Axon.build(model)
       input = random_tensor({@batch, 4, 16}, 66)
-      params = init_fn.(input, %{})
+      params = init_fn.(input, Axon.ModelState.empty())
       output = predict_fn.(params, input)
 
       assert Nx.shape(output) == {@batch, 16}

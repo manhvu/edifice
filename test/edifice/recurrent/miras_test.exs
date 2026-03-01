@@ -17,7 +17,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "produces correct output shape" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :moneta))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512))
       assert Nx.shape(out) == {2, 32}
     end
@@ -25,7 +25,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "outputs are finite" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :moneta))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512))
       assert out |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
       assert out |> Nx.is_infinity() |> Nx.any() |> Nx.to_number() == 0
@@ -34,7 +34,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "batch=1 works" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :moneta))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({1, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({1, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({1, 8, 32}, type: :f32), 256))
       assert Nx.shape(out) == {1, 32}
     end
@@ -43,7 +43,7 @@ defmodule Edifice.Recurrent.MIRASTest do
       opts = @base_opts |> Keyword.put(:variant, :moneta) |> Keyword.put(:p_norm, 3.0)
       model = MIRAS.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512))
       assert Nx.shape(out) == {2, 32}
     end
@@ -53,7 +53,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "produces correct output shape" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :yaad))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512))
       assert Nx.shape(out) == {2, 32}
     end
@@ -61,7 +61,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "outputs are finite" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :yaad))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512))
       assert out |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
       assert out |> Nx.is_infinity() |> Nx.any() |> Nx.to_number() == 0
@@ -70,7 +70,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "batch=1 works" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :yaad))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({1, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({1, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({1, 8, 32}, type: :f32), 256))
       assert Nx.shape(out) == {1, 32}
     end
@@ -80,7 +80,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "produces correct output shape" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :memora))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512))
       assert Nx.shape(out) == {2, 32}
     end
@@ -88,7 +88,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "outputs are finite" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :memora))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512))
       assert out |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
       assert out |> Nx.is_infinity() |> Nx.any() |> Nx.to_number() == 0
@@ -97,7 +97,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "batch=1 works" do
       model = MIRAS.build(Keyword.put(@base_opts, :variant, :memora))
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({1, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({1, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({1, 8, 32}, type: :f32), 256))
       assert Nx.shape(out) == {1, 32}
     end
@@ -107,7 +107,7 @@ defmodule Edifice.Recurrent.MIRASTest do
     test "defaults to moneta" do
       model = MIRAS.build(@base_opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 32}, type: :f32), 512))
       assert Nx.shape(out) == {2, 32}
     end
@@ -116,7 +116,7 @@ defmodule Edifice.Recurrent.MIRASTest do
       opts = Keyword.merge(@base_opts, embed_dim: 24, hidden_size: 32)
       model = MIRAS.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 8, 24}, :f32), %{})
+      params = init_fn.(Nx.template({2, 8, 24}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 8, 24}, type: :f32), 384))
       assert Nx.shape(out) == {2, 32}
     end

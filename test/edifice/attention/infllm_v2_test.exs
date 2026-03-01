@@ -22,7 +22,7 @@ defmodule Edifice.Attention.InfLLMV2Test do
     test "produces correct output shape" do
       model = InfLLMV2.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 32, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 32, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 32, 32}, type: :f32), 2048))
       assert Nx.shape(out) == {2, 32}
     end
@@ -30,7 +30,7 @@ defmodule Edifice.Attention.InfLLMV2Test do
     test "outputs are finite" do
       model = InfLLMV2.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 32, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 32, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 32, 32}, type: :f32), 2048))
       assert out |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
       assert out |> Nx.is_infinity() |> Nx.any() |> Nx.to_number() == 0
@@ -39,7 +39,7 @@ defmodule Edifice.Attention.InfLLMV2Test do
     test "batch=1 works" do
       model = InfLLMV2.build(@opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({1, 32, 32}, :f32), %{})
+      params = init_fn.(Nx.template({1, 32, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({1, 32, 32}, type: :f32), 1024))
       assert Nx.shape(out) == {1, 32}
     end
@@ -48,7 +48,7 @@ defmodule Edifice.Attention.InfLLMV2Test do
       opts = Keyword.merge(@opts, embed_dim: 24, hidden_size: 32)
       model = InfLLMV2.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 32, 24}, :f32), %{})
+      params = init_fn.(Nx.template({2, 32, 24}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 32, 24}, type: :f32), 1536))
       assert Nx.shape(out) == {2, 32}
     end
@@ -57,7 +57,7 @@ defmodule Edifice.Attention.InfLLMV2Test do
       opts = Keyword.put(@opts, :num_layers, 1)
       model = InfLLMV2.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 32, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 32, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 32, 32}, type: :f32), 2048))
       assert Nx.shape(out) == {2, 32}
     end
@@ -66,7 +66,7 @@ defmodule Edifice.Attention.InfLLMV2Test do
       opts = Keyword.put(@opts, :num_topk_blocks, 2)
       model = InfLLMV2.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 32, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 32, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 32, 32}, type: :f32), 2048))
       assert Nx.shape(out) == {2, 32}
     end
@@ -75,7 +75,7 @@ defmodule Edifice.Attention.InfLLMV2Test do
       opts = Keyword.merge(@opts, seq_len: 16, block_size: 4, num_local_blocks: 2)
       model = InfLLMV2.build(opts)
       {init_fn, predict_fn} = Axon.build(model)
-      params = init_fn.(Nx.template({2, 16, 32}, :f32), %{})
+      params = init_fn.(Nx.template({2, 16, 32}, :f32), Axon.ModelState.empty())
       out = predict_fn.(params, Nx.divide(Nx.iota({2, 16, 32}, type: :f32), 1024))
       assert Nx.shape(out) == {2, 32}
     end

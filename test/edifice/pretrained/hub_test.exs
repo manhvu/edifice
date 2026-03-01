@@ -55,6 +55,31 @@ defmodule Edifice.Pretrained.HubTest do
     end
   end
 
+  describe "fetch_config/2" do
+    @describetag :external
+
+    test "fetches config.json from a public repo" do
+      assert {:ok, json} = Hub.fetch_config("hf-internal-testing/tiny-random-vit")
+      config = Jason.decode!(json)
+      assert is_binary(config["model_type"])
+    end
+
+    test "returns error for nonexistent repo" do
+      assert {:error, _reason} =
+               Hub.fetch_config("nonexistent-org-12345/nonexistent-model-67890")
+    end
+  end
+
+  describe "fetch_config!/2" do
+    @describetag :external
+
+    test "raises on error" do
+      assert_raise RuntimeError, ~r/Failed to fetch config.json/, fn ->
+        Hub.fetch_config!("nonexistent-org-12345/nonexistent-model-67890")
+      end
+    end
+  end
+
   describe "download/2 caching" do
     test "detects cached files via file existence" do
       # Create a temp dir simulating a cached model

@@ -42,11 +42,81 @@ defmodule Edifice.Pretrained do
 
   require Logger
 
-  alias Edifice.Pretrained.Transform
+  alias Edifice.Pretrained.{Config, Hub, Transform}
 
   @type load_opt ::
           {:dtype, atom()}
           | {:strict, boolean()}
+
+  @type hub_opt ::
+          {:revision, String.t()}
+          | {:cache_dir, Path.t()}
+          | {:force, boolean()}
+          | {:token, String.t()}
+          | {:dtype, atom()}
+          | {:strict, boolean()}
+          | {:build_opts, keyword()}
+
+  @doc """
+  Downloads and loads a pretrained model from HuggingFace Hub.
+
+  Fetches `config.json` to auto-detect the architecture, downloads the
+  SafeTensors weights, builds the Edifice model, and loads the weights.
+
+  Returns `{model, model_state}` for most architectures. For Whisper
+  (which has separate encoder and decoder), returns
+  `{encoder, decoder, model_state}`.
+
+  ## Options
+
+    - `:revision` — Git revision (branch, tag, commit). Default: `"main"`.
+    - `:cache_dir` — Override cache directory. Default: `~/.cache/edifice`.
+    - `:force` — Re-download even if cached. Default: `false`.
+    - `:token` — HuggingFace API token for private/gated models.
+    - `:dtype` — Cast all tensors to this type (e.g., `:f32`, `:bf16`).
+    - `:strict` — When `true` (default), raises on unmapped checkpoint keys.
+    - `:build_opts` — Additional build opts to merge (overrides config-derived opts).
+
+  ## Examples
+
+      # ViT — returns {model, model_state}
+      {model, model_state} = Edifice.Pretrained.from_hub("google/vit-base-patch16-224")
+      Axon.predict(model, model_state, input)
+
+      # Whisper — returns {encoder, decoder, model_state}
+      {encoder, decoder, model_state} = Edifice.Pretrained.from_hub("openai/whisper-base")
+
+  """
+  @spec from_hub(String.t(), [hub_opt()]) :: {Axon.t(), Axon.ModelState.t()} | {Axon.t(), Axon.t(), Axon.ModelState.t()}
+  def from_hub(repo_id, opts \\ []) do
+    # 1. Fetch and parse config.json
+    hub_opts = Keyword.take(opts, [:revision, :token])
+    config_json = Hub.fetch_config!(repo_id, hub_opts)
+    parsed = Config.parse!(config_json)
+
+    # 2. Download weights
+    download_opts = Keyword.take(opts, [:revision, :cache_dir, :force, :token])
+    paths = Hub.download!(repo_id, download_opts)
+
+    # 3. Build model with config-derived opts, allowing user overrides
+    build_opts = Keyword.merge(parsed.build_opts, Keyword.get(opts, :build_opts, []))
+
+    # 4. Load weights
+    load_opts = Keyword.take(opts, [:dtype, :strict])
+    model_state = load_or_load_sharded(parsed.key_map, paths, load_opts)
+
+    # 5. Build and return appropriate tuple
+    case parsed.model_type do
+      "whisper" ->
+        encoder = Edifice.Audio.Whisper.build_encoder(build_opts)
+        decoder = Edifice.Audio.Whisper.build_decoder(build_opts)
+        {encoder, decoder, model_state}
+
+      _other ->
+        model = parsed.build_fn.(build_opts)
+        {model, model_state}
+    end
+  end
 
   @doc """
   Loads pretrained weights from a SafeTensors file using the given key map.
@@ -199,6 +269,13 @@ defmodule Edifice.Pretrained do
         acc
       end
     end)
+  end
+
+  defp load_or_load_sharded(key_map, paths, opts) do
+    case paths do
+      [single] -> load(key_map, single, opts)
+      multiple -> load_sharded(key_map, multiple, opts)
+    end
   end
 
   defp ensure_safetensors! do

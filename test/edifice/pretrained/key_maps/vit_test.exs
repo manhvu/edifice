@@ -122,11 +122,11 @@ defmodule Edifice.Pretrained.KeyMaps.ViTTest do
   end
 
   describe "concat_keys/0" do
-    test "returns QKV concat rules for 12 layers" do
+    test "returns QKV concat rules for all supported layers" do
       concat = ViT.concat_keys()
 
-      # Should have entries for both kernel and bias, for 12 layers = 24 entries
-      assert map_size(concat) == 24
+      # Should have entries for both kernel and bias, for 48 layers = 96 entries
+      assert map_size(concat) == 96
 
       # Check one kernel group
       assert {sources, 1} = concat["block_0_attn_qkv.kernel"]

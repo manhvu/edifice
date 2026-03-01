@@ -114,7 +114,7 @@ defmodule Edifice.Pretrained.KeyMaps.ViT do
 
   @impl true
   def concat_keys do
-    build_concat_keys(12)
+    build_concat_keys(48)
   end
 
   @doc """

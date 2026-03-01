@@ -103,6 +103,49 @@ defmodule Edifice.Pretrained.Hub do
   end
 
   @doc """
+  Fetches the `config.json` file from a HuggingFace repository.
+
+  Returns `{:ok, json_string}` or `{:error, reason}`.
+
+  ## Options
+
+    - `:revision` — Git revision (branch, tag, commit). Default: `"main"`.
+    - `:token` — HuggingFace API token for private/gated models.
+
+  ## Examples
+
+      {:ok, json} = Hub.fetch_config("google/vit-base-patch16-224")
+      config = Jason.decode!(json)
+      config["model_type"]
+      #=> "vit"
+
+  """
+  @spec fetch_config(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def fetch_config(repo_id, opts \\ []) do
+    ensure_req!()
+
+    revision = Keyword.get(opts, :revision, "main")
+    headers = auth_headers(opts)
+    fetch_file(repo_id, "config.json", revision, headers)
+  end
+
+  @doc """
+  Like `fetch_config/2` but raises on error.
+
+  ## Examples
+
+      json = Hub.fetch_config!("google/vit-base-patch16-224")
+
+  """
+  @spec fetch_config!(String.t(), keyword()) :: String.t()
+  def fetch_config!(repo_id, opts \\ []) do
+    case fetch_config(repo_id, opts) do
+      {:ok, json} -> json
+      {:error, reason} -> raise RuntimeError, "Failed to fetch config.json: #{reason}"
+    end
+  end
+
+  @doc """
   Returns the local cache directory for a given repo.
 
   ## Examples

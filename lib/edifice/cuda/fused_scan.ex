@@ -50,37 +50,57 @@ defmodule Edifice.CUDA.FusedScan do
 
   @doc false
   def elu_gru(gates, candidates) do
-    if cuda_available?(gates) do
-      elu_gru_fused(gates, candidates)
-    else
-      Edifice.Recurrent.NativeRecurrence.elu_gru_scan(gates, candidates)
+    cond do
+      custom_call_available?() ->
+        elu_gru_custom_call(gates, candidates)
+
+      cuda_available?(gates) ->
+        elu_gru_fused(gates, candidates)
+
+      true ->
+        Edifice.Recurrent.NativeRecurrence.elu_gru_scan(gates, candidates)
     end
   end
 
   @doc false
   def real_gru(gates, candidates) do
-    if cuda_available?(gates) do
-      real_gru_fused(gates, candidates)
-    else
-      Edifice.Recurrent.NativeRecurrence.real_gru_scan(gates, candidates)
+    cond do
+      custom_call_available?() ->
+        real_gru_custom_call(gates, candidates)
+
+      cuda_available?(gates) ->
+        real_gru_fused(gates, candidates)
+
+      true ->
+        Edifice.Recurrent.NativeRecurrence.real_gru_scan(gates, candidates)
     end
   end
 
   @doc false
   def diag_linear(a_vals, b_vals) do
-    if cuda_available?(a_vals) do
-      diag_linear_fused(a_vals, b_vals)
-    else
-      Edifice.Recurrent.NativeRecurrence.diag_linear_scan(a_vals, b_vals)
+    cond do
+      custom_call_available?() ->
+        diag_linear_custom_call(a_vals, b_vals)
+
+      cuda_available?(a_vals) ->
+        diag_linear_fused(a_vals, b_vals)
+
+      true ->
+        Edifice.Recurrent.NativeRecurrence.diag_linear_scan(a_vals, b_vals)
     end
   end
 
   @doc false
   def liquid(tau, activation) do
-    if cuda_available?(tau) do
-      liquid_fused(tau, activation)
-    else
-      Edifice.Liquid.liquid_exact_scan(tau, activation)
+    cond do
+      custom_call_available?() ->
+        liquid_custom_call(tau, activation)
+
+      cuda_available?(tau) ->
+        liquid_fused(tau, activation)
+
+      true ->
+        Edifice.Liquid.liquid_exact_scan(tau, activation)
     end
   end
 
@@ -95,10 +115,15 @@ defmodule Edifice.CUDA.FusedScan do
   GSS SSM, MambaVision SSM.
   """
   def linear_scan(a_vals, b_vals) do
-    if cuda_available?(a_vals) do
-      linear_scan_fused(a_vals, b_vals)
-    else
-      linear_scan_fallback(a_vals, b_vals)
+    cond do
+      custom_call_available?() ->
+        linear_scan_custom_call(a_vals, b_vals)
+
+      cuda_available?(a_vals) ->
+        linear_scan_fused(a_vals, b_vals)
+
+      true ->
+        linear_scan_fallback(a_vals, b_vals)
     end
   end
 
@@ -111,10 +136,15 @@ defmodule Edifice.CUDA.FusedScan do
   Returns [batch, seq_len, num_heads, head_dim] retrieval outputs.
   """
   def delta_net_scan(q, k, v, beta) do
-    if cuda_available?(q) do
-      delta_net_fused(q, k, v, beta)
-    else
-      Edifice.Recurrent.DeltaNet.delta_net_sequential_scan(q, k, v, beta)
+    cond do
+      custom_call_available?() ->
+        delta_net_custom_call(q, k, v, beta)
+
+      cuda_available?(q) ->
+        delta_net_fused(q, k, v, beta)
+
+      true ->
+        Edifice.Recurrent.DeltaNet.delta_net_sequential_scan(q, k, v, beta)
     end
   end
 
@@ -127,10 +157,15 @@ defmodule Edifice.CUDA.FusedScan do
   Returns [batch, seq_len, num_heads, head_dim] retrieval outputs.
   """
   def gated_delta_net_scan(q, k, v, beta, alpha) do
-    if cuda_available?(q) do
-      gated_delta_net_fused(q, k, v, beta, alpha)
-    else
-      Edifice.Recurrent.GatedDeltaNet.gated_delta_net_sequential_scan(q, k, v, beta, alpha)
+    cond do
+      custom_call_available?() ->
+        gated_delta_net_custom_call(q, k, v, beta, alpha)
+
+      cuda_available?(q) ->
+        gated_delta_net_fused(q, k, v, beta, alpha)
+
+      true ->
+        Edifice.Recurrent.GatedDeltaNet.gated_delta_net_sequential_scan(q, k, v, beta, alpha)
     end
   end
 
@@ -208,6 +243,210 @@ defmodule Edifice.CUDA.FusedScan do
       end)
 
     h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # ELU-GRU: inputs are raw (pre-activation) — kernel applies sigmoid/elu internally
+  defp elu_gru_custom_call(gates, candidates) do
+    {batch, seq_len, hidden} = Nx.shape(gates)
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_elu_gru_scan, [gates, candidates, h0], output, fn g, c, h0 ->
+      elu_gru_scan_fallback(g, c, h0)
+    end)
+  end
+
+  defp elu_gru_scan_fallback(gates, candidates, h0) do
+    {_batch, seq_len, _hidden} = Nx.shape(gates)
+
+    {_, h_list} =
+      Enum.reduce(0..(seq_len - 1), {h0, []}, fn t, {h_prev, acc} ->
+        g_t = Nx.slice_along_axis(gates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        c_t = Nx.slice_along_axis(candidates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        z_t = Nx.sigmoid(g_t)
+        c_act = Nx.add(1.0, Nx.select(Nx.greater(c_t, 0), c_t, Nx.subtract(Nx.exp(c_t), 1.0)))
+        h_t = Nx.add(Nx.multiply(Nx.subtract(1.0, z_t), h_prev), Nx.multiply(z_t, c_act))
+        {h_t, [h_t | acc]}
+      end)
+
+    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # Real-GRU: inputs are raw — kernel applies sigmoid internally
+  defp real_gru_custom_call(gates, candidates) do
+    {batch, seq_len, hidden} = Nx.shape(gates)
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_real_gru_scan, [gates, candidates, h0], output, fn g, c, h0 ->
+      real_gru_scan_fallback(g, c, h0)
+    end)
+  end
+
+  defp real_gru_scan_fallback(gates, candidates, h0) do
+    {_batch, seq_len, _hidden} = Nx.shape(gates)
+
+    {_, h_list} =
+      Enum.reduce(0..(seq_len - 1), {h0, []}, fn t, {h_prev, acc} ->
+        g_t = Nx.slice_along_axis(gates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        c_t = Nx.slice_along_axis(candidates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        z_t = Nx.sigmoid(g_t)
+        h_t = Nx.add(Nx.multiply(Nx.subtract(1.0, z_t), h_prev), Nx.multiply(z_t, c_t))
+        {h_t, [h_t | acc]}
+      end)
+
+    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # Diag-Linear: inputs are raw — kernel applies sigmoid to a_vals internally
+  defp diag_linear_custom_call(a_vals, b_vals) do
+    {batch, seq_len, hidden} = Nx.shape(a_vals)
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_diag_linear_scan, [a_vals, b_vals, h0], output, fn a, b, h0 ->
+      diag_linear_scan_fallback(a, b, h0)
+    end)
+  end
+
+  defp diag_linear_scan_fallback(a_vals, b_vals, h0) do
+    {_batch, seq_len, _hidden} = Nx.shape(a_vals)
+
+    {_, h_list} =
+      Enum.reduce(0..(seq_len - 1), {h0, []}, fn t, {h_prev, acc} ->
+        a_t = Nx.slice_along_axis(a_vals, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        b_t = Nx.slice_along_axis(b_vals, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        h_t = Nx.add(Nx.multiply(Nx.sigmoid(a_t), h_prev), b_t)
+        {h_t, [h_t | acc]}
+      end)
+
+    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # Liquid (LTC) exact solver: x(t+1) = act + (x(t) - act) * exp(-1/tau)
+  defp liquid_custom_call(tau, activation) do
+    {batch, seq_len, hidden} = Nx.shape(tau)
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_liquid_scan, [tau, activation, h0], output, fn tau, act, h0 ->
+      liquid_scan_fallback(tau, act, h0)
+    end)
+  end
+
+  defp liquid_scan_fallback(tau, activation, h0) do
+    {_batch, seq_len, _hidden} = Nx.shape(tau)
+
+    {_, h_list} =
+      Enum.reduce(0..(seq_len - 1), {h0, []}, fn t, {h_prev, acc} ->
+        tau_t = Nx.slice_along_axis(tau, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        act_t = Nx.slice_along_axis(activation, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        decay = Nx.exp(Nx.negate(Nx.divide(1.0, tau_t)))
+        h_t = Nx.add(act_t, Nx.multiply(Nx.subtract(h_prev, act_t), decay))
+        {h_t, [h_t | acc]}
+      end)
+
+    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # Linear recurrence: h = a*h + b (no nonlinearities, pre-computed coefficients)
+  defp linear_scan_custom_call(a_vals, b_vals) do
+    {batch, seq_len, hidden} = Nx.shape(a_vals)
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_linear_scan, [a_vals, b_vals, h0], output, fn a, b, h0 ->
+      linear_scan_cc_fallback(a, b, h0)
+    end)
+  end
+
+  defp linear_scan_cc_fallback(a_vals, b_vals, h0) do
+    {_batch, seq_len, _hidden} = Nx.shape(a_vals)
+
+    {_, h_list} =
+      Enum.reduce(0..(seq_len - 1), {h0, []}, fn t, {h_prev, acc} ->
+        a_t = Nx.slice_along_axis(a_vals, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        b_t = Nx.slice_along_axis(b_vals, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        h_t = Nx.add(Nx.multiply(a_t, h_prev), b_t)
+        {h_t, [h_t | acc]}
+      end)
+
+    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # DeltaNet delta rule: matrix-state recurrence
+  defp delta_net_custom_call(q, k, v, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+    output = Nx.template({batch, seq_len, num_heads, head_dim}, {:f, 32})
+
+    Nx.Shared.optional(:fused_delta_net_scan, [q, k, v, beta], output, fn q, k, v, beta ->
+      delta_net_scan_fallback(q, k, v, beta)
+    end)
+  end
+
+  defp delta_net_scan_fallback(q, k, v, beta) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+
+    s0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_heads, head_dim, head_dim})
+
+    {_, o_list} =
+      Enum.reduce(0..(seq_len - 1), {s0, []}, fn t, {s_prev, acc} ->
+        q_t = Nx.slice_along_axis(q, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        k_t = Nx.slice_along_axis(k, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        v_t = Nx.slice_along_axis(v, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        beta_t = Nx.slice_along_axis(beta, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+        # S@k: [B,H,D,D] x [B,H,D] -> [B,H,D]
+        sk = Nx.dot(s_prev, [3], [0, 1], Nx.new_axis(k_t, -1), [2], [0, 1]) |> Nx.squeeze(axes: [-1])
+        # delta = beta * outer(v - S@k, k)
+        diff = Nx.subtract(v_t, sk)
+        delta = Nx.multiply(Nx.new_axis(beta_t, -1), Nx.multiply(Nx.new_axis(diff, -1), Nx.new_axis(k_t, -2)))
+        s_t = Nx.add(s_prev, delta)
+        # o = S@q
+        o_t = Nx.dot(s_t, [3], [0, 1], Nx.new_axis(q_t, -1), [2], [0, 1]) |> Nx.squeeze(axes: [-1])
+        {s_t, [o_t | acc]}
+      end)
+
+    o_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # GatedDeltaNet: delta rule with per-head scalar decay
+  defp gated_delta_net_custom_call(q, k, v, beta, alpha) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+    output = Nx.template({batch, seq_len, num_heads, head_dim}, {:f, 32})
+
+    Nx.Shared.optional(:fused_gated_delta_net_scan, [q, k, v, beta, alpha], output, fn q, k, v, beta, alpha ->
+      gated_delta_net_scan_fallback(q, k, v, beta, alpha)
+    end)
+  end
+
+  defp gated_delta_net_scan_fallback(q, k, v, beta, alpha) do
+    {batch, seq_len, num_heads, head_dim} = Nx.shape(q)
+
+    s0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_heads, head_dim, head_dim})
+
+    {_, o_list} =
+      Enum.reduce(0..(seq_len - 1), {s0, []}, fn t, {s_prev, acc} ->
+        q_t = Nx.slice_along_axis(q, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        k_t = Nx.slice_along_axis(k, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        v_t = Nx.slice_along_axis(v, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        beta_t = Nx.slice_along_axis(beta, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        alpha_t = Nx.slice_along_axis(alpha, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+        # Decay: S = alpha * S (alpha is [B,H], broadcast to [B,H,D,D])
+        alpha_broad = alpha_t |> Nx.new_axis(-1) |> Nx.new_axis(-1)
+        s_decayed = Nx.multiply(alpha_broad, s_prev)
+
+        # Delta update (same as DeltaNet)
+        sk = Nx.dot(s_decayed, [3], [0, 1], Nx.new_axis(k_t, -1), [2], [0, 1]) |> Nx.squeeze(axes: [-1])
+        diff = Nx.subtract(v_t, sk)
+        delta = Nx.multiply(Nx.new_axis(beta_t, -1), Nx.multiply(Nx.new_axis(diff, -1), Nx.new_axis(k_t, -2)))
+        s_t = Nx.add(s_decayed, delta)
+        o_t = Nx.dot(s_t, [3], [0, 1], Nx.new_axis(q_t, -1), [2], [0, 1]) |> Nx.squeeze(axes: [-1])
+        {s_t, [o_t | acc]}
+      end)
+
+    o_list |> Enum.reverse() |> Nx.stack(axis: 1)
   end
 
   # ============================================================================

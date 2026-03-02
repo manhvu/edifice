@@ -214,6 +214,49 @@ defmodule Edifice.CUDA.FusedScan do
   end
 
   @doc """
+  Standard LSTM scan with hidden-to-hidden matmul fused into the kernel.
+
+  Inputs are pre-computed W@x + bias `[batch, seq_len, 4*hidden]` and recurrent
+  weight R `[hidden, 4*hidden]`. The kernel computes R@h internally using
+  shared memory. Standard sigmoid/tanh gating: i/f/o = σ, g = tanh,
+  c = f*c + i*g, h = o*tanh(c).
+  """
+  def lstm_scan(wx, recurrent_weight) do
+    cond do
+      custom_call_available?() ->
+        lstm_custom_call(wx, recurrent_weight)
+
+      cuda_available?(wx) ->
+        lstm_fused(wx, recurrent_weight)
+
+      true ->
+        lstm_scan_fallback(wx, recurrent_weight, nil, nil)
+    end
+  end
+
+  @doc """
+  Standard GRU scan with hidden-to-hidden matmul fused into the kernel.
+
+  Inputs are pre-computed W@x + bias `[batch, seq_len, 3*hidden]` and recurrent
+  weight R `[hidden, 3*hidden]`. The kernel computes R@h internally using
+  shared memory. Reset gate applied selectively to recurrent contribution:
+  r = σ(wx_r + rh_r), z = σ(wx_z + rh_z), n = tanh(wx_n + r*rh_n),
+  h = (1-z)*n + z*h_prev.
+  """
+  def gru_scan(wx, recurrent_weight) do
+    cond do
+      custom_call_available?() ->
+        gru_custom_call(wx, recurrent_weight)
+
+      cuda_available?(wx) ->
+        gru_fused(wx, recurrent_weight)
+
+      true ->
+        gru_scan_fallback(wx, recurrent_weight, nil)
+    end
+  end
+
+  @doc """
   TTT-Linear scan with per-timestep weight matrix update.
 
   Inputs: pre-projected Q, K, V, eta `[batch, seq_len, inner_size]`,
@@ -709,6 +752,102 @@ defmodule Edifice.CUDA.FusedScan do
         h_t = Nx.multiply(o_t, Nx.divide(c_t, safe_denom))
 
         {{h_t, c_t, n_t, m_t}, [h_t | acc]}
+      end)
+
+    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # Standard LSTM: classic 4-gate LSTM with cell and hidden state
+  defp lstm_custom_call(wx, recurrent_weight) do
+    {batch, seq_len, hidden4} = Nx.shape(wx)
+    hidden = div(hidden4, 4)
+
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    c0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_lstm_scan, [wx, recurrent_weight, h0, c0], output,
+      fn wx, r, h0, c0 ->
+        lstm_scan_fallback(wx, r, h0, c0)
+      end)
+  end
+
+  defp lstm_scan_fallback(wx, recurrent_weight, h0, c0) do
+    {batch, seq_len, hidden4} = Nx.shape(wx)
+    hidden = div(hidden4, 4)
+
+    h0 = if h0, do: h0, else: Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    c0 = if c0, do: c0, else: Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+
+    {_, h_list} =
+      Enum.reduce(0..(seq_len - 1), {{h0, c0}, []}, fn t, {{h_p, c_p}, acc} ->
+        wx_t = Nx.slice_along_axis(wx, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        rh_t = Nx.dot(h_p, [1], recurrent_weight, [0])
+        gates_t = Nx.add(wx_t, rh_t)
+
+        i_t = Nx.slice_along_axis(gates_t, 0, hidden, axis: 1) |> Nx.sigmoid()
+        f_t = Nx.slice_along_axis(gates_t, hidden, hidden, axis: 1) |> Nx.sigmoid()
+        g_t = Nx.slice_along_axis(gates_t, hidden * 2, hidden, axis: 1) |> Nx.tanh()
+        o_t = Nx.slice_along_axis(gates_t, hidden * 3, hidden, axis: 1) |> Nx.sigmoid()
+
+        c_t = Nx.add(Nx.multiply(f_t, c_p), Nx.multiply(i_t, g_t))
+        h_t = Nx.multiply(o_t, Nx.tanh(c_t))
+
+        {{h_t, c_t}, [h_t | acc]}
+      end)
+
+    h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # Standard GRU: 3-gate GRU with reset applied to recurrent part only
+  defp gru_custom_call(wx, recurrent_weight) do
+    {batch, seq_len, hidden3} = Nx.shape(wx)
+    hidden = div(hidden3, 3)
+
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_gru_scan, [wx, recurrent_weight, h0], output,
+      fn wx, r, h0 ->
+        gru_scan_fallback(wx, r, h0)
+      end)
+  end
+
+  defp gru_scan_fallback(wx, recurrent_weight, h0) do
+    {batch, seq_len, hidden3} = Nx.shape(wx)
+    hidden = div(hidden3, 3)
+
+    h0 = if h0, do: h0, else: Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
+
+    {_, h_list} =
+      Enum.reduce(0..(seq_len - 1), {h0, []}, fn t, {h_p, acc} ->
+        wx_t = Nx.slice_along_axis(wx, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        rh_t = Nx.dot(h_p, [1], recurrent_weight, [0])
+
+        # Reset and update gates use full wx + rh
+        r_t = Nx.add(
+          Nx.slice_along_axis(wx_t, 0, hidden, axis: 1),
+          Nx.slice_along_axis(rh_t, 0, hidden, axis: 1)
+        ) |> Nx.sigmoid()
+
+        z_t = Nx.add(
+          Nx.slice_along_axis(wx_t, hidden, hidden, axis: 1),
+          Nx.slice_along_axis(rh_t, hidden, hidden, axis: 1)
+        ) |> Nx.sigmoid()
+
+        # Candidate: reset applied only to recurrent contribution
+        n_t = Nx.add(
+          Nx.slice_along_axis(wx_t, hidden * 2, hidden, axis: 1),
+          Nx.multiply(r_t, Nx.slice_along_axis(rh_t, hidden * 2, hidden, axis: 1))
+        ) |> Nx.tanh()
+
+        # Blend: h = (1-z)*n + z*h_prev
+        h_t = Nx.add(
+          Nx.multiply(Nx.subtract(1.0, z_t), n_t),
+          Nx.multiply(z_t, h_p)
+        )
+
+        {h_t, [h_t | acc]}
       end)
 
     h_list |> Enum.reverse() |> Nx.stack(axis: 1)
@@ -1261,6 +1400,68 @@ defmodule Edifice.CUDA.FusedScan do
 
       {:error, reason} ->
         raise "CUDA fused sLSTM scan failed: #{reason}"
+    end
+  end
+
+  defp lstm_fused(wx, recurrent_weight) do
+    {batch, seq_len, hidden4} = Nx.shape(wx)
+    hidden = div(hidden4, 4)
+
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}, backend: backend_for(wx)), {batch, hidden})
+    c0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}, backend: backend_for(wx)), {batch, hidden})
+
+    wx_ptr = Nx.to_pointer(wx, mode: :local)
+    r_ptr = Nx.to_pointer(recurrent_weight, mode: :local)
+    h0_ptr = Nx.to_pointer(h0, mode: :local)
+    c0_ptr = Nx.to_pointer(c0, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_lstm_scan(
+           wx_ptr.address, r_ptr.address, h0_ptr.address, c0_ptr.address,
+           batch, seq_len, hidden
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * hidden * 4
+
+        Nx.from_pointer(
+          {backend_for(wx), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, hidden}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused LSTM scan failed: #{reason}"
+    end
+  end
+
+  defp gru_fused(wx, recurrent_weight) do
+    {batch, seq_len, hidden3} = Nx.shape(wx)
+    hidden = div(hidden3, 3)
+
+    h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}, backend: backend_for(wx)), {batch, hidden})
+
+    wx_ptr = Nx.to_pointer(wx, mode: :local)
+    r_ptr = Nx.to_pointer(recurrent_weight, mode: :local)
+    h0_ptr = Nx.to_pointer(h0, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_gru_scan(
+           wx_ptr.address, r_ptr.address, h0_ptr.address,
+           batch, seq_len, hidden
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * hidden * 4
+
+        Nx.from_pointer(
+          {backend_for(wx), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, hidden}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused GRU scan failed: #{reason}"
     end
   end
 

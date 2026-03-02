@@ -234,21 +234,17 @@ defmodule Edifice.Recurrent do
     use_layer_norm = Keyword.get(opts, :use_layer_norm, true)
     recurrent_init = Keyword.get(opts, :recurrent_initializer, :glorot_uniform)
 
-    # RNN stability comes from layer normalization (below) + lower learning rates
-    # Orthogonal init can help but has shape constraints that fail with small hidden sizes
-    # This is the recommended initialization for RNNs per Saxe et al. (2013)
-    recurrent_opts = [
-      name: name,
-      recurrent_initializer: recurrent_init,
-      use_bias: true
-    ]
-
-    # Axon.lstm/gru returns {output_sequence, hidden_state_tuple}
-    # We need to extract just the output sequence using Axon.elem
-    {output_seq, _hidden} =
-      case cell_type do
-        :lstm -> Axon.lstm(input, hidden_size, recurrent_opts)
-        :gru -> Axon.gru(input, hidden_size, recurrent_opts)
+    output_seq =
+      if fused_rnn_available?(cell_type) do
+        build_fused_recurrent(input, hidden_size, cell_type,
+          name: name,
+          recurrent_initializer: recurrent_init
+        )
+      else
+        build_axon_recurrent(input, hidden_size, cell_type,
+          name: name,
+          recurrent_initializer: recurrent_init
+        )
       end
 
     # Apply layer normalization for stability (normalizes across hidden dimension)
@@ -275,6 +271,75 @@ defmodule Edifice.Recurrent do
         name: "#{name}_last"
       )
     end
+  end
+
+  # Fused CUDA path: pre-compute W@x + bias, pass recurrent weight R to kernel
+  defp build_fused_recurrent(input, hidden_size, cell_type, opts) do
+    name = Keyword.get(opts, :name, "recurrent")
+    recurrent_init = Keyword.get(opts, :recurrent_initializer, :glorot_uniform)
+
+    num_gates = case cell_type do
+      :lstm -> 4
+      :gru -> 3
+    end
+
+    gate_size = num_gates * hidden_size
+
+    # Input projection: W@x + bias → [B, T, G*H]
+    wx = Axon.dense(input, gate_size,
+      name: "#{name}_input_proj",
+      kernel_initializer: :glorot_uniform,
+      use_bias: true
+    )
+
+    # Recurrent weight R: [H, G*H] — passed directly to kernel
+    r_param = Axon.param("#{name}_recurrent_kernel", {hidden_size, gate_size},
+      initializer: recurrent_init
+    )
+
+    # Fused scan layer: kernel computes R@h internally
+    # Axon.layer always appends an opts map as the last argument
+    scan_fn = case cell_type do
+      :lstm -> fn wx, r, _opts -> Edifice.CUDA.FusedScan.lstm_scan(wx, r) end
+      :gru -> fn wx, r, _opts -> Edifice.CUDA.FusedScan.gru_scan(wx, r) end
+    end
+
+    Axon.layer(scan_fn, [wx, r_param],
+      name: "#{name}_fused_scan",
+      op_name: :"fused_#{cell_type}_scan"
+    )
+  end
+
+  # Standard Axon path: uses Axon.lstm/gru with while_loop unrolling
+  defp build_axon_recurrent(input, hidden_size, cell_type, opts) do
+    name = Keyword.get(opts, :name, "recurrent")
+    recurrent_init = Keyword.get(opts, :recurrent_initializer, :glorot_uniform)
+
+    recurrent_opts = [
+      name: name,
+      recurrent_initializer: recurrent_init,
+      use_bias: true
+    ]
+
+    {output_seq, _hidden} =
+      case cell_type do
+        :lstm -> Axon.lstm(input, hidden_size, recurrent_opts)
+        :gru -> Axon.gru(input, hidden_size, recurrent_opts)
+      end
+
+    output_seq
+  end
+
+  # Check if fused CUDA kernels are available for standard LSTM/GRU
+  defp fused_rnn_available?(cell_type) when cell_type in [:lstm, :gru] do
+    Edifice.CUDA.FusedScan.custom_call_available?() or nif_available?()
+  end
+
+  defp fused_rnn_available?(_), do: false
+
+  defp nif_available? do
+    Code.ensure_loaded?(Edifice.CUDA.NIF) and
+      function_exported?(Edifice.CUDA.NIF, :fused_lstm_scan, 7)
   end
 
   # ============================================================================

@@ -68,6 +68,14 @@ defmodule Edifice.CUDA.NIF do
     do: :erlang.nif_error(:not_loaded)
 
   @doc false
+  def fused_lstm_scan(_wx, _r, _h0, _c0, _batch, _seq, _hidden),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_gru_scan(_wx, _r, _h0, _batch, _seq, _hidden),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
   def fused_ttt_scan(_q, _k, _v, _eta, _w0, _lng, _lnb, _batch, _seq, _inner),
     do: :erlang.nif_error(:not_loaded)
 

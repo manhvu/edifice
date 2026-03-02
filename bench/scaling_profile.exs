@@ -13,6 +13,9 @@
 
 Nx.default_backend(EXLA.Backend)
 
+# Suppress noisy XLA/cuDNN info logs (harmless algorithm-selection messages)
+Logger.configure(level: :warning)
+
 defmodule ScalingProfile do
   @batch String.to_integer(System.get_env("BENCH_BATCH", "1"))
   @iters String.to_integer(System.get_env("BENCH_ITERS", "20"))

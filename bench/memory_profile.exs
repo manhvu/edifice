@@ -15,6 +15,9 @@
 
 Nx.default_backend(EXLA.Backend)
 
+# Suppress noisy XLA/cuDNN info logs (harmless algorithm-selection messages)
+Logger.configure(level: :warning)
+
 defmodule MemoryProfile do
   @embed String.to_integer(System.get_env("BENCH_EMBED", "256"))
   @seq_len String.to_integer(System.get_env("BENCH_SEQ_LEN", "32"))

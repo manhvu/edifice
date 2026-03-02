@@ -273,6 +273,28 @@ defmodule Edifice.Recurrent do
     end
   end
 
+  @doc """
+  Build a raw RNN layer (LSTM or GRU) with fused CUDA kernel when available.
+
+  Returns just the output sequence `[batch, seq_len, hidden_size]` — no LayerNorm,
+  no last-timestep extraction. Use this when you need to integrate LSTM/GRU into
+  a custom architecture (residual blocks, hybrid models, etc.).
+
+  Falls back to `Axon.lstm`/`Axon.gru` when CUDA kernels are unavailable.
+
+  ## Options
+    - `:name` - Layer name prefix (default: "recurrent")
+    - `:recurrent_initializer` - Initializer for recurrent weights (default: :glorot_uniform)
+  """
+  @spec build_raw_rnn(Axon.t(), non_neg_integer(), cell_type(), keyword()) :: Axon.t()
+  def build_raw_rnn(input, hidden_size, cell_type, opts \\ []) do
+    if fused_rnn_available?(cell_type) do
+      build_fused_recurrent(input, hidden_size, cell_type, opts)
+    else
+      build_axon_recurrent(input, hidden_size, cell_type, opts)
+    end
+  end
+
   # Fused CUDA path: pre-compute W@x + bias, pass recurrent weight R to kernel
   defp build_fused_recurrent(input, hidden_size, cell_type, opts) do
     name = Keyword.get(opts, :name, "recurrent")
@@ -330,12 +352,12 @@ defmodule Edifice.Recurrent do
     output_seq
   end
 
-  # Check if fused CUDA kernels are available for standard LSTM/GRU
-  defp fused_rnn_available?(cell_type) when cell_type in [:lstm, :gru] do
+  @doc false
+  def fused_rnn_available?(cell_type) when cell_type in [:lstm, :gru] do
     Edifice.CUDA.FusedScan.custom_call_available?() or nif_available?()
   end
 
-  defp fused_rnn_available?(_), do: false
+  def fused_rnn_available?(_), do: false
 
   defp nif_available? do
     Code.ensure_loaded?(Edifice.CUDA.NIF) and

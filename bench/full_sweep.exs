@@ -11,6 +11,9 @@
 
 Nx.default_backend(EXLA.Backend)
 
+# Suppress noisy XLA/cuDNN info logs (harmless algorithm-selection messages)
+Logger.configure(level: :warning)
+
 defmodule FullSweep do
   # Shared small dims (same as registry_sweep_test.exs)
   @batch 4

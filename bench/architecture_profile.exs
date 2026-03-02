@@ -11,6 +11,9 @@
 
 Nx.default_backend(EXLA.Backend)
 
+# Suppress noisy XLA/cuDNN info logs (harmless algorithm-selection messages)
+Logger.configure(level: :warning)
+
 defmodule ArchProfile do
   @batch 4
   @seq_len 32

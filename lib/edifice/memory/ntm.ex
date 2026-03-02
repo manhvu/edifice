@@ -174,9 +174,9 @@ defmodule Edifice.Memory.NTM do
         name: "controller_reshape"
       )
 
-    # LSTM controller
-    {output_seq, _hidden} =
-      Axon.lstm(seq_input, controller_size,
+    # LSTM controller — uses fused CUDA kernel when available
+    output_seq =
+      Edifice.Recurrent.build_raw_rnn(seq_input, controller_size, :lstm,
         name: "controller_lstm",
         recurrent_initializer: :glorot_uniform
       )

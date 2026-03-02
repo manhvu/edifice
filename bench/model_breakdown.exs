@@ -12,6 +12,9 @@
 
 Nx.default_backend(EXLA.Backend)
 
+# Suppress noisy XLA/cuDNN info logs (harmless algorithm-selection messages)
+Logger.configure(level: :warning)
+
 defmodule ModelBreakdown do
   @warmup 10
   @iters 50

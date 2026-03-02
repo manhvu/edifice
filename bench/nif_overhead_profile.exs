@@ -11,6 +11,9 @@
 
 Nx.default_backend(EXLA.Backend)
 
+# Suppress noisy XLA/cuDNN info logs (harmless algorithm-selection messages)
+Logger.configure(level: :warning)
+
 defmodule NIFOverheadProfile do
   @warmup 5
   @iters 50

@@ -136,11 +136,10 @@ defmodule Edifice.Recurrent.TransformerLike do
         x
       end
 
-    {output_seq, _hidden} =
-      case cell_type do
-        :lstm -> Axon.lstm(rnn_input, hidden_size, name: "lstm_#{layer_idx}")
-        :gru -> Axon.gru(rnn_input, hidden_size, name: "gru_#{layer_idx}")
-      end
+    output_seq =
+      Edifice.Recurrent.build_raw_rnn(rnn_input, hidden_size, cell_type,
+        name: "#{cell_type}_#{layer_idx}"
+      )
 
     output_seq =
       if dropout > 0 do

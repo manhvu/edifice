@@ -17,6 +17,9 @@ Nx.default_backend(EXLA.Backend)
 System.put_env("EDIFICE_NO_AUTORUN", "1")
 Code.require_file("bench/full_sweep.exs")
 
+# Suppress noisy XLA/cuDNN info logs (harmless algorithm-selection messages)
+Logger.configure(level: :warning)
+
 defmodule SanityCheck do
   @doc """
   Run sanity checks on architecture specs from FullSweep.

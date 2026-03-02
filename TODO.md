@@ -173,6 +173,15 @@ Full research notes in `notebooks/research/interpretability_architectures.md`.
 - [x] **CUDA Kernel Fusion (P2)** — Matrix-state recurrences with `[D,D]` state matrices per head. 7 kernels: DeltaNet, GatedDeltaNet, DeltaProduct, sLSTM, TTT, Mamba (selective scan), KDA, RLA (dual-state). All have 3-tier dispatch (custom call → NIF → Elixir). KDA uses per-channel decay; RLA supports both moving-avg and delta-rule variants via mode flag. Files: `native/cuda/fused_{delta_rule,delta_product,slstm,ttt,selective,kda,rla}_scan.cu`.
 - [x] **EXLA GPU Custom Call Infrastructure** — GPU-native custom calls staying inside the XLA computation graph (no graph breaks). EXLA fork at `/home/nixos/nx/exla/` with nvcc `.cu` compilation, `-DEXLA_FFI` flag, stablehlo.custom_call bindings in `value.ex`, `cached_recur_operator` CUDA-platform pattern-match in `defn.ex`. Edifice dispatches via `Nx.Shared.optional` with Elixir fallback. All 9 kernels wired: MinGRU, MinLSTM, ELU-GRU, Real-GRU, DiagLinear, Liquid, LinearScan, DeltaNet, GatedDeltaNet. Use `Axon.build(model, compiler: EXLA)` for cached graph compilation (97x speedup).
 - [x] **EXLA Custom Calls — All Kernels Wired** — All 9 P0/P1 kernels have `cached_recur_operator` clauses in `defn.ex` and 3-tier dispatch (custom call → NIF → Elixir) in `fused_scan.ex`. 3813 tests pass.
+- [x] **CUDA Kernel Fusion (P3)** — Standard LSTM and GRU fused scan kernels. Pre-compute W@x+bias on Axon side, R@h via shared memory in kernel. LSTM: 4-gate (i/f/g/o) with cell+hidden state. GRU: 3-gate (r/z/n) with reset applied selectively to recurrent contribution. Full 3-tier dispatch. `recurrent.ex` auto-detects and uses fused path; DeepResLSTM, TransformerLike, NTM, and Hybrid also wired.
+- [ ] **CUDA Kernel Fusion (P4)** — New kernel types for architectures with unique sequential scan patterns. Candidates by priority:
+  - **Reservoir** (Echo State) — `h = tanh(W_in*x + W_res*h)`, fixed-weight RNN, simplest kernel target
+  - **Griffin RG-LRU** — `h = a^(c*r)*h + sqrt(1-a^2)*i*x`, gated linear recurrence
+  - **HGRN** — `h = f*h + i*x` with state expansion/contraction
+  - **Titans** — Per-timestep matrix ops: `pred = M@k`, surprise computation, gated memory update
+  - **MIRAS** — Iterative memory reasoning with per-timestep gradient + memory update
+  - **GSA** (Gated Slot Attention) — Per-timestep slot memory read/write
+  - **InfiniAttention** — Segment-level memory read/write/update with gating
 
 ## Open — Codebase Quality (from 2026-02-27 evaluation)
 
@@ -264,9 +273,14 @@ transformation between PyTorch and Axon conventions.
 
 - [x] **Fix `passing parameter map to initialization is deprecated, use %Axon.ModelState{}` warnings** — Replaced `init_fn.(template, %{})` with `init_fn.(template, Axon.ModelState.empty())` in 29 test files (113 occurrences). Warnings eliminated.
 
+### ExPhil Inference Benchmarks (Priority: Medium)
+
+- [ ] **Profile Griffin vs Mamba gap** — Griffin uses the same `linear_scan` kernel as Mamba but benchmarks 2.4x slower (100ms vs 42ms on T400). Profile to determine whether the bottleneck is the RG-LRU pre-computation, extra Axon layers, or graph compilation overhead. Tools: `EXLA.Backend.profiler`, nvprof/nsys.
+- [ ] **Broad fused-kernel benchmark** — Run inference benchmarks across all ~18 exphil architectures that have fused CUDA kernels (MinGRU, MinLSTM, xLSTM, Mamba, GatedSSM, Griffin, DeltaNet, GatedDeltaNet, DeltaProduct, sLSTM, TTT, KDA, RLA, etc.) to get a complete picture of speedups on T400 4GB. Compare with/without fused kernels enabled.
+
 ### cuDNN Algorithm Warning (Priority: Low)
 
-- [ ] **Investigate `Omitted potentially buggy algorithm eng14{k25=2} for conv` info messages** — XLA/cuDNN emits info-level log messages about omitting potentially buggy convolution algorithms (e.g., `eng14{k25=2}` for `__cudnn$convBiasActivationForward`). These appear for several conv ops during EXLA tests. Likely harmless (XLA falls back to a safe algorithm), but worth understanding whether cuDNN version upgrade or config flag can suppress them.
+- [x] **Investigate `Omitted potentially buggy algorithm eng14{k25=2} for conv` info messages** — Investigated: cuDNN 9.x harmlessly skips algorithm variants during autotuning. Info-level messages from XLA C++ bridged via EXLA.Logger. Already suppressed in tests (`Logger.configure(level: :warning)` in test_helper.exs). Added same suppression to all bench scripts.
 
 ### ML-Specific Quality (Priority: Low)
 - [ ] **ONNX integration guide** — Document workflow: Edifice.build → Axon model → axon_onnx export → inference in other runtimes. Even if axon_onnx is a separate package, showing the integration path is valuable.

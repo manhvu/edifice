@@ -115,7 +115,10 @@ defmodule Edifice.Recurrent.DeepResLSTM do
   defp res_lstm_block(x, hidden_size, dropout, norm, layer_idx) do
     normed = apply_norm(x, norm, hidden_size, "block_#{layer_idx}_prenorm")
 
-    {output_seq, _hidden} = Axon.lstm(normed, hidden_size, name: "lstm_#{layer_idx}")
+    output_seq =
+      Edifice.Recurrent.build_raw_rnn(normed, hidden_size, :lstm,
+        name: "lstm_#{layer_idx}"
+      )
 
     # Zero-initialized decoder — starts as identity (residual passes through unchanged)
     decoded =

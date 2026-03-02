@@ -352,9 +352,9 @@ defmodule Edifice.SSM.Hybrid do
         input
       end
 
-    # Axon.gru returns {output_seq, hidden_state} — we only need the sequence
-    {output_seq, _hidden} =
-      Axon.gru(normalized_input, hidden_size,
+    # Uses fused CUDA GRU kernel when available, falls back to Axon.gru
+    output_seq =
+      Edifice.Recurrent.build_raw_rnn(normalized_input, hidden_size, :gru,
         name: "#{name}_gru",
         recurrent_initializer: :glorot_uniform
       )

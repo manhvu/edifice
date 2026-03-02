@@ -182,24 +182,14 @@ Full research notes in `notebooks/research/interpretability_architectures.md`.
   - Not needed: Griffin RG-LRU (uses P1 `linear_scan`), HGRN (parallel log-cumsum-exp), InfiniAttention (segment-level, few iterations)
 - [ ] **CUDA Kernel Fusion (P5) — Backward-Pass Kernels** — Fused backward (gradient) kernels for training-time performance. Each forward scan has a corresponding reverse-time scan that accumulates gradients w.r.t. inputs and initial state. Without fused backward kernels, `Nx.Defn.value_and_grad` falls back to Elixir sequential scan for the backward pass even when the forward pass uses CUDA.
   - [x] **Phase 1 (done)** — Linear scan, MinGRU, MinLSTM backward kernels. Establishes pattern: `custom_grad` wiring, NIF multi-output via concatenated buffer, EXLA FFI multi-Ret. Commit d04210a.
-  - [ ] **Phase 2 — P0 element-wise backward kernels** — 5 kernels sharing identical thread layout (no shared memory):
-    - [ ] **ELU-GRU backward** — `h = (1-z)*h_prev + z*(1+elu(c))`. Reverse: `dz = dh*(c'-h_prev)`, `dc = dh*z*elu'(c)`, `dh_acc = dh*(1-z)`. Sigmoid+ELU chain rules in Elixir.
-    - [ ] **Real-GRU backward** — `h = (1-z)*h_prev + z*c`. Identical to MinGRU backward (same recurrence, different input naming).
-    - [ ] **DiagLinear backward** — `h = sigmoid(a)*h_prev + b`. Reverse: `da = dh*h_prev*a*(1-a)`, `db = dh`, `dh_acc = dh*sigmoid(a)`. Sigmoid chain rule in kernel (a is pre-sigmoid in forward).
-    - [ ] **Standard LSTM backward** — BPTT with 4-gate gradients (i/f/g/o) + R@h via shared memory. Outputs: grad_wx [B,T,4H], grad_R [H,4H], grad_h0/c0 [B,H]. Most complex P0 kernel.
-    - [ ] **Standard GRU backward** — BPTT with 3-gate gradients (r/z/n) + R@h via shared memory. Reset gate applies selectively to recurrent candidate contribution.
-  - [ ] **Phase 3 — P1 moderate backward kernels** — 5 kernels with more complex gate interactions:
-    - [ ] **Liquid backward** — `h = (1-tau)*h_prev + tau*act`. Similar to MinGRU but with separate tau/act gradients.
-    - [ ] **DeltaNet backward** — Matrix-state `S += beta*(v@k^T - (k^T@S)*k@k^T)`. Reverse scan with dS accumulator, outputs dQ/dK/dV/dbeta.
-    - [ ] **GatedDeltaNet backward** — DeltaNet + alpha gating: `S = alpha*S + beta*(...)`. Additional grad_alpha output.
-    - [ ] **DeltaProduct backward** — Multi-step Householder: n_h products of `(I - 2*k@k^T)` per timestep. Chain rule through product sequence.
-    - [ ] **sLSTM backward** — Exponential gating with stabilization. 4 gates but exp() instead of sigmoid for i/f. Stabilizer max tracking complicates gradient.
-  - [ ] **Phase 4 — P2 complex backward kernels** — 4 kernels with multi-dimensional state or matrix ops:
-    - [ ] **Selective scan (Mamba) backward** — State `h[i] = A[i]*h[i] + B[i]*x`, output `y = C@h`. Reverse scan over state dim, outputs dA/dB/dC/dD/ddt.
+  - [x] **Phase 2 (done)** — 5 P0 element-wise backward kernels: ELU-GRU, Real-GRU, DiagLinear, standard LSTM (BPTT + R@h shared mem), standard GRU (3-gate + R@h shared mem).
+  - [x] **Phase 3 (done)** — 5 moderate backward kernels: Liquid (tau/act chain rule), DeltaNet (matrix-state dS reverse), GatedDeltaNet (+ alpha decay grad), DeltaProduct (nested Householder + RMS norm + L2 norm chain), sLSTM (exp gating + 3 accumulators).
+  - [ ] **Phase 4 — P2 complex backward kernels** — 3 remaining kernels (in progress):
+    - [x] **Selective scan (Mamba) backward** — Done. State `h[i] = A[i]*h[i] + B[i]*x`, output `y = C@h`. Reverse scan over state dim.
     - [ ] **TTT backward** — Inner SGD loop: `W -= eta*(W@k - v)@k^T`. Reverse through SGD steps with dW/deta/dk/dv.
     - [ ] **KDA backward** — Channel-wise decay `S = diag(alpha)*S + v@k^T`. Per-channel alpha gradient.
     - [ ] **RLA backward** — Dual-state S+R with variant flag. Two reverse accumulators, outputs depend on variant (moving-avg vs delta-rule).
-  - **Deferred (P3)** — Reservoir (frozen W_res, no training gradient), Titans/MIRAS (niche, complex matrix state), GSA (slot memory), Flash/LASER/FoX attention (backward flash attention is a separate large project).
+  - **Deferred** — Reservoir (frozen W_res, no training gradient), Titans/MIRAS (niche, complex matrix state), GSA (slot memory), Flash/LASER/FoX attention (backward flash attention is a separate large project).
 - [ ] **CUDA Kernel Fusion (P6) — bf16/f16 Kernel Variants** — Half-precision variants of all 19 existing kernels. Doubles memory bandwidth, roughly halves latency for bandwidth-bound kernels. Many ExPhil architectures are close to the 16ms target — bf16 could push them under. Requires: `__half` / `__nv_bfloat16` types, `__hmul`/`__hadd` intrinsics, mixed-precision accumulation (f32 accumulators with bf16 I/O) for numerical stability.
 - [x] **CUDA Kernel Fusion (P7) — Matrix-State Linear Attention Family** — Investigated RetNet, RWKV, GLA/GLA v2. All three already use **parallel** training formulations (decay matrix, log-cumsum-exp, cumulative_sum) with no sequential bottleneck in `build/1`. Fused recurrent kernels would only help single-step inference decoding (not current use case). No new kernels needed.
 - [x] **CUDA Kernel Fusion (P8) — Flash Attention Variants** — Modified flash attention kernels for attention architectures with non-standard score/value transformations. 2 new kernels + 1 wiring change:

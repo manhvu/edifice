@@ -96,6 +96,14 @@ defmodule Edifice.CUDA.NIF do
     do: :erlang.nif_error(:not_loaded)
 
   @doc false
+  def fused_laser_attention(_q, _k, _v, _v_max, _batch, _heads, _seq, _head_dim, _causal),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_fox_attention(_q, _k, _v, _cs, _batch, _heads, _seq, _head_dim),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
   def fused_reservoir_scan(_wx, _w_res, _h0, _batch, _seq, _hidden, _leak_rate),
     do: :erlang.nif_error(:not_loaded)
 
@@ -109,5 +117,27 @@ defmodule Edifice.CUDA.NIF do
 
   @doc false
   def fused_gsa_scan(_q, _k_slot, _v, _alpha, _batch, _seq, _heads, _slots, _head_dim),
+    do: :erlang.nif_error(:not_loaded)
+
+  # Multi-layer block scan kernels
+  @doc false
+  def fused_mingru_block_scan(_input_ptr, _weights_ptr, _h0_ptr, _batch, _seq_len, _hidden, _num_layers),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_minlstm_block_scan(_input_ptr, _weights_ptr, _h0_ptr, _batch, _seq_len, _hidden, _num_layers),
+    do: :erlang.nif_error(:not_loaded)
+
+  # Backward kernels — multi-output via concatenated buffer
+  @doc false
+  def fused_linear_scan_backward(_a_ptr, _h0_ptr, _fwd_ptr, _grad_ptr, _batch, _seq, _hidden),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_mingru_scan_backward(_z_ptr, _cand_ptr, _h0_ptr, _fwd_ptr, _grad_ptr, _batch, _seq, _hidden),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_minlstm_scan_backward(_f_ptr, _i_ptr, _cand_ptr, _h0_ptr, _fwd_ptr, _grad_ptr, _batch, _seq, _hidden),
     do: :erlang.nif_error(:not_loaded)
 end

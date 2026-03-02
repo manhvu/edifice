@@ -376,8 +376,19 @@ defmodule Edifice.CUDA.FusedScan do
     # Output template for Nx.Shared.optional
     output = Nx.template({batch, seq_len, hidden}, {:f, 32})
 
-    Nx.Shared.optional(:fused_mingru_scan, [z, candidates, h0], output, fn z, cand, h0 ->
-      mingru_scan_fallback(z, cand, h0)
+    forward_output =
+      Nx.Shared.optional(:fused_mingru_scan, [z, candidates, h0], output, fn z, cand, h0 ->
+        mingru_scan_fallback(z, cand, h0)
+      end)
+
+    # Attach backward custom call via custom_grad
+    # custom_grad inputs are [raw_gates, candidates] (pre-sigmoid)
+    Nx.Defn.Kernel.custom_grad(forward_output, [gates, candidates], fn grad_output ->
+      {grad_z, grad_cand, _grad_h0} =
+        mingru_backward_dispatch(z, candidates, h0, forward_output, grad_output)
+      # Chain rule: d/d(raw_gates) = d/d(z) * sigmoid'(raw_gates) = d/d(z) * z * (1-z)
+      grad_gates = Nx.multiply(grad_z, Nx.multiply(z, Nx.subtract(1.0, z)))
+      [grad_gates, grad_cand]
     end)
   end
 
@@ -394,8 +405,20 @@ defmodule Edifice.CUDA.FusedScan do
     # Output template for Nx.Shared.optional
     output = Nx.template({batch, seq_len, hidden}, {:f, 32})
 
-    Nx.Shared.optional(:fused_minlstm_scan, [f, i, candidates, h0], output, fn f, i, cand, h0 ->
-      minlstm_scan_fallback(f, i, cand, h0)
+    forward_output =
+      Nx.Shared.optional(:fused_minlstm_scan, [f, i, candidates, h0], output, fn f, i, cand, h0 ->
+        minlstm_scan_fallback(f, i, cand, h0)
+      end)
+
+    # Attach backward custom call via custom_grad
+    # custom_grad inputs are [raw_forget_gates, raw_input_gates, candidates] (pre-sigmoid)
+    Nx.Defn.Kernel.custom_grad(forward_output, [forget_gates, input_gates, candidates], fn grad_output ->
+      {grad_f, grad_i, grad_cand, _grad_h0} =
+        minlstm_backward_dispatch(f, i, candidates, h0, forward_output, grad_output)
+      # Chain rule: d/d(raw) = d/d(sigmoid_out) * sigmoid_out * (1 - sigmoid_out)
+      grad_raw_f = Nx.multiply(grad_f, Nx.multiply(f, Nx.subtract(1.0, f)))
+      grad_raw_i = Nx.multiply(grad_i, Nx.multiply(i, Nx.subtract(1.0, i)))
+      [grad_raw_f, grad_raw_i, grad_cand]
     end)
   end
 
@@ -413,6 +436,57 @@ defmodule Edifice.CUDA.FusedScan do
       end)
 
     h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  defp mingru_backward_dispatch(z, candidates, h0, forward_out, grad_output) do
+    {batch, seq_len, hidden} = Nx.shape(z)
+    grad_z_template = Nx.template({batch, seq_len, hidden}, {:f, 32})
+    grad_cand_template = Nx.template({batch, seq_len, hidden}, {:f, 32})
+    grad_h0_template = Nx.template({batch, hidden}, {:f, 32})
+
+    Nx.Shared.optional(
+      :fused_mingru_scan_backward,
+      [z, candidates, h0, forward_out, grad_output],
+      {grad_z_template, grad_cand_template, grad_h0_template},
+      fn z, cand, h0, fwd, grad ->
+        mingru_backward_fallback(z, cand, h0, fwd, grad)
+      end
+    )
+  end
+
+  @doc false
+  def mingru_backward_fallback(z, candidates, h0, forward_out, grad_output) do
+    {batch, seq_len, hidden} = Nx.shape(z)
+
+    grad_z = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, seq_len, hidden})
+    grad_cand = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, seq_len, hidden})
+
+    {_, gz, gc, dh_acc} =
+      Enum.reduce((seq_len - 1)..0//-1, {nil, grad_z, grad_cand, Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})}, fn t, {_, gz, gc, dh_prev} ->
+        grad_t = Nx.slice_along_axis(grad_output, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        dh = Nx.add(grad_t, dh_prev)
+
+        z_t = Nx.slice_along_axis(z, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        c_t = Nx.slice_along_axis(candidates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+        h_prev =
+          if t == 0 do
+            h0
+          else
+            Nx.slice_along_axis(forward_out, t - 1, 1, axis: 1) |> Nx.squeeze(axes: [1])
+          end
+
+        dz_t = Nx.multiply(dh, Nx.subtract(c_t, h_prev))
+        dc_t = Nx.multiply(dh, z_t)
+        dh_next = Nx.multiply(dh, Nx.subtract(1.0, z_t))
+
+        gz = Nx.put_slice(gz, [0, t, 0], Nx.new_axis(dz_t, 1))
+        gc = Nx.put_slice(gc, [0, t, 0], Nx.new_axis(dc_t, 1))
+
+        {nil, gz, gc, dh_next}
+      end)
+
+    {gz, gc, dh_acc}
   end
 
   defp minlstm_scan_fallback(f_gate, i_gate, candidates, h0) do
@@ -434,6 +508,78 @@ defmodule Edifice.CUDA.FusedScan do
       end)
 
     h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  defp minlstm_backward_dispatch(f, i, candidates, h0, forward_out, grad_output) do
+    {batch, seq_len, hidden} = Nx.shape(f)
+    grad_f_template = Nx.template({batch, seq_len, hidden}, {:f, 32})
+    grad_i_template = Nx.template({batch, seq_len, hidden}, {:f, 32})
+    grad_cand_template = Nx.template({batch, seq_len, hidden}, {:f, 32})
+    grad_h0_template = Nx.template({batch, hidden}, {:f, 32})
+
+    Nx.Shared.optional(
+      :fused_minlstm_scan_backward,
+      [f, i, candidates, h0, forward_out, grad_output],
+      {grad_f_template, grad_i_template, grad_cand_template, grad_h0_template},
+      fn f, i, cand, h0, fwd, grad ->
+        minlstm_backward_fallback(f, i, cand, h0, fwd, grad)
+      end
+    )
+  end
+
+  @doc false
+  def minlstm_backward_fallback(f_gate, i_gate, candidates, h0, forward_out, grad_output) do
+    {batch, seq_len, hidden} = Nx.shape(f_gate)
+    norm_eps = 1.0e-6
+
+    grad_f = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, seq_len, hidden})
+    grad_i = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, seq_len, hidden})
+    grad_cand = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, seq_len, hidden})
+
+    {_, gf, gi, gcand, dc_acc} =
+      Enum.reduce((seq_len - 1)..0//-1, {nil, grad_f, grad_i, grad_cand, Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})}, fn t, {_, gf, gi, gcand, dc_prev} ->
+        grad_t = Nx.slice_along_axis(grad_output, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        dc = Nx.add(grad_t, dc_prev)
+
+        f_t = Nx.slice_along_axis(f_gate, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        i_t = Nx.slice_along_axis(i_gate, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        cand_t = Nx.slice_along_axis(candidates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+        # Normalization
+        s = Nx.add(f_t, Nx.add(i_t, norm_eps))
+        f_norm = Nx.divide(f_t, s)
+        i_norm = Nx.divide(i_t, s)
+
+        c_prev =
+          if t == 0 do
+            h0
+          else
+            Nx.slice_along_axis(forward_out, t - 1, 1, axis: 1) |> Nx.squeeze(axes: [1])
+          end
+
+        # Gradients w.r.t. normalized gates
+        df_norm = Nx.multiply(dc, c_prev)
+        di_norm = Nx.multiply(dc, cand_t)
+
+        # Gradient w.r.t. candidates
+        dcand_t = Nx.multiply(dc, i_norm)
+
+        # Accumulate gradient for c_{t-1}
+        dc_next = Nx.multiply(dc, f_norm)
+
+        # Through normalization (quotient rule)
+        s2 = Nx.multiply(s, s)
+        df_t = Nx.divide(Nx.subtract(Nx.multiply(df_norm, Nx.add(i_t, norm_eps)), Nx.multiply(di_norm, i_t)), s2)
+        di_t = Nx.divide(Nx.add(Nx.negate(Nx.multiply(df_norm, f_t)), Nx.multiply(di_norm, Nx.add(f_t, norm_eps))), s2)
+
+        gf = Nx.put_slice(gf, [0, t, 0], Nx.new_axis(df_t, 1))
+        gi = Nx.put_slice(gi, [0, t, 0], Nx.new_axis(di_t, 1))
+        gcand = Nx.put_slice(gcand, [0, t, 0], Nx.new_axis(dcand_t, 1))
+
+        {nil, gf, gi, gcand, dc_next}
+      end)
+
+    {gf, gi, gcand, dc_acc}
   end
 
   # ELU-GRU: inputs are raw (pre-activation) — kernel applies sigmoid/elu internally
@@ -541,14 +687,38 @@ defmodule Edifice.CUDA.FusedScan do
   end
 
   # Linear recurrence: h = a*h + b (no nonlinearities, pre-computed coefficients)
+  # Forward custom call + backward custom call via custom_grad
   defp linear_scan_custom_call(a_vals, b_vals) do
     {batch, seq_len, hidden} = Nx.shape(a_vals)
     h0 = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})
     output = Nx.template({batch, seq_len, hidden}, {:f, 32})
 
-    Nx.Shared.optional(:fused_linear_scan, [a_vals, b_vals, h0], output, fn a, b, h0 ->
-      linear_scan_cc_fallback(a, b, h0)
+    forward_output =
+      Nx.Shared.optional(:fused_linear_scan, [a_vals, b_vals, h0], output, fn a, b, h0 ->
+        linear_scan_cc_fallback(a, b, h0)
+      end)
+
+    Nx.Defn.Kernel.custom_grad(forward_output, [a_vals, b_vals], fn grad_output ->
+      {grad_a, grad_b, _grad_h0} =
+        linear_scan_backward_dispatch(a_vals, h0, forward_output, grad_output)
+      [grad_a, grad_b]
     end)
+  end
+
+  defp linear_scan_backward_dispatch(a_vals, h0, forward_out, grad_output) do
+    {batch, seq_len, hidden} = Nx.shape(a_vals)
+    grad_a_template = Nx.template({batch, seq_len, hidden}, {:f, 32})
+    grad_b_template = Nx.template({batch, seq_len, hidden}, {:f, 32})
+    grad_h0_template = Nx.template({batch, hidden}, {:f, 32})
+
+    Nx.Shared.optional(
+      :fused_linear_scan_backward,
+      [a_vals, h0, forward_out, grad_output],
+      {grad_a_template, grad_b_template, grad_h0_template},
+      fn a, h0, fwd, grad ->
+        linear_scan_backward_fallback(a, h0, fwd, grad)
+      end
+    )
   end
 
   defp linear_scan_cc_fallback(a_vals, b_vals, h0) do
@@ -563,6 +733,40 @@ defmodule Edifice.CUDA.FusedScan do
       end)
 
     h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  @doc false
+  def linear_scan_backward_fallback(a_vals, h0, forward_out, grad_output) do
+    {batch, seq_len, hidden} = Nx.shape(a_vals)
+
+    grad_a = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, seq_len, hidden})
+    grad_b = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, seq_len, hidden})
+
+    {_, grad_a_acc, grad_b_acc, dh_acc} =
+      Enum.reduce((seq_len - 1)..0//-1, {nil, grad_a, grad_b, Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, hidden})}, fn t, {_, ga, gb, dh_prev} ->
+        grad_t = Nx.slice_along_axis(grad_output, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+        dh = Nx.add(grad_t, dh_prev)
+
+        h_prev =
+          if t == 0 do
+            h0
+          else
+            Nx.slice_along_axis(forward_out, t - 1, 1, axis: 1) |> Nx.squeeze(axes: [1])
+          end
+
+        a_t = Nx.slice_along_axis(a_vals, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+        da_t = Nx.multiply(dh, h_prev)
+        db_t = dh
+        dh_next = Nx.multiply(dh, a_t)
+
+        ga = Nx.put_slice(ga, [0, t, 0], Nx.new_axis(da_t, 1))
+        gb = Nx.put_slice(gb, [0, t, 0], Nx.new_axis(db_t, 1))
+
+        {nil, ga, gb, dh_next}
+      end)
+
+    {grad_a_acc, grad_b_acc, dh_acc}
   end
 
   # DeltaNet delta rule: matrix-state recurrence
@@ -1727,6 +1931,257 @@ defmodule Edifice.CUDA.FusedScan do
   end
 
   # ============================================================================
+  # LASER Attention (flash attention + exp(V) + log output)
+  # ============================================================================
+
+  @doc """
+  LASER flash attention: `O = log(softmax(QK^T / sqrt(d)) @ exp(V))`.
+
+  Uses the LWSE trick: subtract `v_max` before exp, add back after log.
+
+  ## Arguments
+
+    * `q` - Query tensor `[batch, heads, seq, head_dim]` (f32)
+    * `k` - Key tensor `[batch, heads, seq, head_dim]` (f32)
+    * `v` - Value tensor `[batch, heads, seq, head_dim]` (f32)
+    * `opts` - Options:
+      * `:causal` - Apply causal mask (default: `true`)
+
+  ## Returns
+
+    Output tensor `[batch, heads, seq, head_dim]` (f32)
+  """
+  def laser_attention(q, k, v, opts \\ []) do
+    causal = if Keyword.get(opts, :causal, true), do: 1, else: 0
+
+    # Precompute v_max: [batch, heads, 1, head_dim]
+    v_max = Nx.reduce_max(v, axes: [2], keep_axes: true)
+
+    cond do
+      laser_attention_custom_call_available?() ->
+        laser_attention_custom_call(q, k, v, v_max, causal)
+
+      cuda_available?(q) ->
+        laser_attention_fused(q, k, v, v_max, causal)
+
+      true ->
+        laser_attention_fallback(q, k, v, v_max, causal)
+    end
+  end
+
+  defp laser_attention_custom_call_available? do
+    exla_value = Module.concat([EXLA, MLIR, Value])
+
+    Code.ensure_loaded?(exla_value) and
+      function_exported?(exla_value, :fused_laser_attention, 6)
+  rescue
+    _ -> false
+  end
+
+  defp laser_attention_custom_call(q, k, v, v_max, causal) do
+    {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
+    output = Nx.template({batch, num_heads, seq_len, head_dim}, {:f, 32})
+    causal_tensor = Nx.tensor(causal, type: {:s, 32})
+
+    Nx.Shared.optional(:fused_laser_attention, [q, k, v, v_max, causal_tensor], output, fn q, k, v, v_max, _causal ->
+      laser_attention_fallback(q, k, v, v_max, causal)
+    end)
+  end
+
+  defp laser_attention_fused(q, k, v, v_max, causal) do
+    {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
+
+    q_ptr = Nx.to_pointer(q, mode: :local)
+    k_ptr = Nx.to_pointer(k, mode: :local)
+    v_ptr = Nx.to_pointer(v, mode: :local)
+    vmax_ptr = Nx.to_pointer(v_max, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_laser_attention(
+           q_ptr.address, k_ptr.address, v_ptr.address, vmax_ptr.address,
+           batch, num_heads, seq_len, head_dim, causal
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * num_heads * seq_len * head_dim * 4
+
+        Nx.from_pointer(
+          {backend_for(q), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, num_heads, seq_len, head_dim}
+        )
+
+      {:error, reason} ->
+        raise "CUDA LASER attention failed: #{reason}"
+    end
+  end
+
+  defp laser_attention_fallback(q, k, v, v_max, causal) do
+    {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
+
+    # exp(V - v_max) for numerical stability
+    exp_v = Nx.exp(Nx.subtract(v, v_max))
+
+    # Standard scaled dot-product attention scores
+    scale = Nx.sqrt(Nx.tensor(head_dim, type: {:f, 32}))
+    scores = Nx.divide(Nx.dot(q, [3], [0, 1], k, [3], [0, 1]), scale)
+
+    # Apply causal mask if requested
+    scores =
+      if causal == 1 do
+        rows = Nx.iota({seq_len, seq_len}, axis: 0)
+        cols = Nx.iota({seq_len, seq_len}, axis: 1)
+        mask = Nx.greater_equal(rows, cols)
+
+        mask =
+          mask
+          |> Nx.reshape({1, 1, seq_len, seq_len})
+          |> Nx.broadcast({batch, num_heads, seq_len, seq_len})
+
+        neg_inf = Nx.Constants.neg_infinity({:f, 32})
+        Nx.select(mask, scores, neg_inf)
+      else
+        scores
+      end
+
+    # Softmax + weighted sum of exp(V - v_max)
+    weights = Nx.exp(Nx.subtract(scores, Nx.reduce_max(scores, axes: [-1], keep_axes: true)))
+    weights = Nx.divide(weights, Nx.sum(weights, axes: [-1], keep_axes: true))
+
+    attn_out = Nx.dot(weights, [3], [0, 1], exp_v, [2], [0, 1])
+
+    # log(max(result, 1e-7)) + v_max
+    Nx.add(Nx.log(Nx.max(attn_out, 1.0e-7)), v_max)
+  end
+
+  # ============================================================================
+  # FoX Attention (flash attention + forget bias)
+  # ============================================================================
+
+  @doc """
+  FoX flash attention: `softmax(QK^T / sqrt(d) + forget_bias) @ V`.
+
+  The forget bias is computed from cumulative log-forget values:
+  `F[i,j] = cs[i] - cs[j]` where `cs = cumsum(log(sigmoid(f)))`.
+
+  Always causal (forget gates are inherently directional).
+
+  ## Arguments
+
+    * `q` - Query tensor `[batch, heads, seq, head_dim]` (f32)
+    * `k` - Key tensor `[batch, heads, seq, head_dim]` (f32)
+    * `v` - Value tensor `[batch, heads, seq, head_dim]` (f32)
+    * `cs` - Cumulative log-forget `[batch, heads, seq]` (f32)
+
+  ## Returns
+
+    Output tensor `[batch, heads, seq, head_dim]` (f32)
+  """
+  def fox_attention(q, k, v, cs) do
+    cond do
+      fox_attention_custom_call_available?() ->
+        fox_attention_custom_call(q, k, v, cs)
+
+      cuda_available?(q) ->
+        fox_attention_fused(q, k, v, cs)
+
+      true ->
+        fox_attention_fallback(q, k, v, cs)
+    end
+  end
+
+  defp fox_attention_custom_call_available? do
+    exla_value = Module.concat([EXLA, MLIR, Value])
+
+    Code.ensure_loaded?(exla_value) and
+      function_exported?(exla_value, :fused_fox_attention, 5)
+  rescue
+    _ -> false
+  end
+
+  defp fox_attention_custom_call(q, k, v, cs) do
+    {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
+    output = Nx.template({batch, num_heads, seq_len, head_dim}, {:f, 32})
+
+    Nx.Shared.optional(:fused_fox_attention, [q, k, v, cs], output, fn q, k, v, cs ->
+      fox_attention_fallback(q, k, v, cs)
+    end)
+  end
+
+  defp fox_attention_fused(q, k, v, cs) do
+    {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
+
+    q_ptr = Nx.to_pointer(q, mode: :local)
+    k_ptr = Nx.to_pointer(k, mode: :local)
+    v_ptr = Nx.to_pointer(v, mode: :local)
+    cs_ptr = Nx.to_pointer(cs, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_fox_attention(
+           q_ptr.address, k_ptr.address, v_ptr.address, cs_ptr.address,
+           batch, num_heads, seq_len, head_dim
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * num_heads * seq_len * head_dim * 4
+
+        Nx.from_pointer(
+          {backend_for(q), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, num_heads, seq_len, head_dim}
+        )
+
+      {:error, reason} ->
+        raise "CUDA FoX attention failed: #{reason}"
+    end
+  end
+
+  defp fox_attention_fallback(q, k, v, cs) do
+    {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
+
+    # Standard scaled dot-product attention scores
+    scale = Nx.sqrt(Nx.tensor(head_dim, type: {:f, 32}))
+    scores = Nx.divide(Nx.dot(q, [3], [0, 1], k, [3], [0, 1]), scale)
+
+    # Add forget bias: F[i,j] = cs[i] - cs[j]
+    cs_i = Nx.new_axis(cs, -1)    # [B, H, T, 1]
+    cs_j = Nx.new_axis(cs, -2)    # [B, H, 1, T]
+    forget_bias = Nx.subtract(cs_i, cs_j)
+
+    # Zero out diagonal (no forgetting for self-attention)
+    diag_mask =
+      Nx.equal(
+        Nx.iota({seq_len, seq_len}, axis: 0),
+        Nx.iota({seq_len, seq_len}, axis: 1)
+      )
+      |> Nx.reshape({1, 1, seq_len, seq_len})
+      |> Nx.broadcast({batch, num_heads, seq_len, seq_len})
+
+    forget_bias = Nx.select(diag_mask, Nx.tensor(0.0, type: {:f, 32}), forget_bias)
+
+    scores = Nx.add(scores, forget_bias)
+
+    # Causal mask (FoX is always causal)
+    rows = Nx.iota({seq_len, seq_len}, axis: 0)
+    cols = Nx.iota({seq_len, seq_len}, axis: 1)
+    causal_mask = Nx.greater_equal(rows, cols)
+
+    causal_mask =
+      causal_mask
+      |> Nx.reshape({1, 1, seq_len, seq_len})
+      |> Nx.broadcast({batch, num_heads, seq_len, seq_len})
+
+    neg_inf = Nx.Constants.neg_infinity({:f, 32})
+    scores = Nx.select(causal_mask, scores, neg_inf)
+
+    # Softmax + weighted sum
+    weights = Nx.exp(Nx.subtract(scores, Nx.reduce_max(scores, axes: [-1], keep_axes: true)))
+    weights = Nx.divide(weights, Nx.sum(weights, axes: [-1], keep_axes: true))
+
+    Nx.dot(weights, [3], [0, 1], v, [2], [0, 1])
+  end
+
+  # ============================================================================
   # Reservoir (Echo State Network) scan
   # ============================================================================
 
@@ -2142,6 +2597,266 @@ defmodule Edifice.CUDA.FusedScan do
       end)
 
     h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+  end
+
+  # ============================================================================
+  # Multi-layer block scan — MinGRU
+  # ============================================================================
+
+  @doc """
+  Multi-layer fused MinGRU block scan.
+
+  Processes all layers in a single kernel launch. LayerNorm, dense projections,
+  sigmoid, scan, and residual are all fused per layer with activations kept in
+  shared memory / registers.
+
+  ## Inputs
+    * `input` - [B, T, H] input sequence
+    * `weights` - flat packed weights, `[num_layers * (2*H*H + 4*H)]`
+    * `h0` - [B, num_layers, H] per-layer initial hidden states
+    * `num_layers` - number of layers
+
+  ## Returns
+    `[B, T, H]` — output of the final layer for all timesteps
+  """
+  def mingru_block(input, weights, h0, num_layers) do
+    cond do
+      block_custom_call_available?() ->
+        mingru_block_custom_call(input, weights, h0, num_layers)
+
+      cuda_available?(input) ->
+        mingru_block_fused(input, weights, h0, num_layers)
+
+      true ->
+        mingru_block_fallback(input, weights, h0, num_layers)
+    end
+  end
+
+  defp mingru_block_custom_call(input, weights, h0, num_layers) do
+    {batch, seq_len, hidden} = Nx.shape(input)
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_mingru_block_scan, [input, weights, h0], output, fn inp, w, h ->
+      mingru_block_fallback(inp, w, h, num_layers)
+    end)
+  end
+
+  defp mingru_block_fused(input, weights, h0, num_layers) do
+    {batch, seq_len, hidden} = Nx.shape(input)
+
+    input_ptr = Nx.to_pointer(input, mode: :local)
+    weights_ptr = Nx.to_pointer(weights, mode: :local)
+    h0_ptr = Nx.to_pointer(h0, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_mingru_block_scan(
+           input_ptr.address, weights_ptr.address, h0_ptr.address,
+           batch, seq_len, hidden, num_layers
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * hidden * 4
+
+        Nx.from_pointer(
+          {backend_for(input), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, hidden}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused MinGRU block scan failed: #{reason}"
+    end
+  end
+
+  defp mingru_block_fallback(input, weights, h0, num_layers) do
+    {_batch, _seq_len, hidden} = Nx.shape(input)
+    layer_stride = 2 * hidden * hidden + 4 * hidden
+
+    Enum.reduce(0..(num_layers - 1), input, fn layer, x ->
+      offset = layer * layer_stride
+
+      # Extract per-layer weights from packed buffer
+      w_z = Nx.slice(weights, [offset], [hidden * hidden]) |> Nx.reshape({hidden, hidden})
+      offset = offset + hidden * hidden
+      b_z = Nx.slice(weights, [offset], [hidden])
+      offset = offset + hidden
+      w_h = Nx.slice(weights, [offset], [hidden * hidden]) |> Nx.reshape({hidden, hidden})
+      offset = offset + hidden * hidden
+      b_h = Nx.slice(weights, [offset], [hidden])
+      offset = offset + hidden
+      gamma = Nx.slice(weights, [offset], [hidden])
+      offset = offset + hidden
+      beta = Nx.slice(weights, [offset], [hidden])
+
+      # LayerNorm
+      mean = Nx.mean(x, axes: [-1], keep_axes: true)
+      var = Nx.variance(x, axes: [-1], keep_axes: true)
+      normed = Nx.multiply(Nx.multiply(Nx.subtract(x, mean), Nx.rsqrt(Nx.add(var, 1.0e-5))), gamma)
+      normed = Nx.add(normed, beta)
+
+      # Dense projections: [B,T,H] @ [H,H]^T -> [B,T,H]
+      z_pre = Nx.add(Nx.dot(normed, [2], w_z, [0]), b_z)
+      c_pre = Nx.add(Nx.dot(normed, [2], w_h, [0]), b_h)
+
+      # Sigmoid + scan
+      z = Nx.sigmoid(z_pre)
+      candidates = c_pre
+
+      # Run per-layer scan (reuse existing scan function)
+      h_layer_init = Nx.slice_along_axis(h0, layer, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+      {_batch_size, seq_len, _hidden} = Nx.shape(z)
+      {_, h_list} =
+        Enum.reduce(0..(seq_len - 1), {h_layer_init, []}, fn t, {h_prev, acc} ->
+          z_t = Nx.slice_along_axis(z, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+          c_t = Nx.slice_along_axis(candidates, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+          h_t = Nx.add(Nx.multiply(Nx.subtract(1.0, z_t), h_prev), Nx.multiply(z_t, c_t))
+          {h_t, [h_t | acc]}
+        end)
+      scan_out = h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+
+      # Residual
+      Nx.add(x, scan_out)
+    end)
+  end
+
+  # ============================================================================
+  # Multi-layer block scan — MinLSTM
+  # ============================================================================
+
+  @doc """
+  Multi-layer fused MinLSTM block scan.
+
+  Same as `mingru_block/4` but for MinLSTM with 3 projections and gate normalization.
+
+  ## Inputs
+    * `input` - [B, T, H] input sequence
+    * `weights` - flat packed weights, `[num_layers * (3*H*H + 5*H)]`
+    * `h0` - [B, num_layers, H] per-layer initial hidden states
+    * `num_layers` - number of layers
+
+  ## Returns
+    `[B, T, H]` — output of the final layer for all timesteps
+  """
+  def minlstm_block(input, weights, h0, num_layers) do
+    cond do
+      block_custom_call_available?() ->
+        minlstm_block_custom_call(input, weights, h0, num_layers)
+
+      cuda_available?(input) ->
+        minlstm_block_fused(input, weights, h0, num_layers)
+
+      true ->
+        minlstm_block_fallback(input, weights, h0, num_layers)
+    end
+  end
+
+  defp minlstm_block_custom_call(input, weights, h0, num_layers) do
+    {batch, seq_len, hidden} = Nx.shape(input)
+    output = Nx.template({batch, seq_len, hidden}, {:f, 32})
+
+    Nx.Shared.optional(:fused_minlstm_block_scan, [input, weights, h0], output, fn inp, w, h ->
+      minlstm_block_fallback(inp, w, h, num_layers)
+    end)
+  end
+
+  defp minlstm_block_fused(input, weights, h0, num_layers) do
+    {batch, seq_len, hidden} = Nx.shape(input)
+
+    input_ptr = Nx.to_pointer(input, mode: :local)
+    weights_ptr = Nx.to_pointer(weights, mode: :local)
+    h0_ptr = Nx.to_pointer(h0, mode: :local)
+
+    case Edifice.CUDA.NIF.fused_minlstm_block_scan(
+           input_ptr.address, weights_ptr.address, h0_ptr.address,
+           batch, seq_len, hidden, num_layers
+         ) do
+      {:ok, out_addr, gc_ref} ->
+        hold_gc_ref(out_addr, gc_ref)
+        out_bytes = batch * seq_len * hidden * 4
+
+        Nx.from_pointer(
+          {backend_for(input), client: :cuda, device_id: 0},
+          %Nx.Pointer{kind: :local, address: out_addr, data_size: out_bytes},
+          {:f, 32},
+          {batch, seq_len, hidden}
+        )
+
+      {:error, reason} ->
+        raise "CUDA fused MinLSTM block scan failed: #{reason}"
+    end
+  end
+
+  defp minlstm_block_fallback(input, weights, h0, num_layers) do
+    {_batch, _seq_len, hidden} = Nx.shape(input)
+    layer_stride = 3 * hidden * hidden + 5 * hidden
+    norm_eps = 1.0e-6
+
+    Enum.reduce(0..(num_layers - 1), input, fn layer, x ->
+      offset = layer * layer_stride
+
+      # Extract per-layer weights
+      w_f = Nx.slice(weights, [offset], [hidden * hidden]) |> Nx.reshape({hidden, hidden})
+      offset = offset + hidden * hidden
+      b_f = Nx.slice(weights, [offset], [hidden])
+      offset = offset + hidden
+      w_i = Nx.slice(weights, [offset], [hidden * hidden]) |> Nx.reshape({hidden, hidden})
+      offset = offset + hidden * hidden
+      b_i = Nx.slice(weights, [offset], [hidden])
+      offset = offset + hidden
+      w_h = Nx.slice(weights, [offset], [hidden * hidden]) |> Nx.reshape({hidden, hidden})
+      offset = offset + hidden * hidden
+      b_h = Nx.slice(weights, [offset], [hidden])
+      offset = offset + hidden
+      gamma = Nx.slice(weights, [offset], [hidden])
+      offset = offset + hidden
+      beta = Nx.slice(weights, [offset], [hidden])
+
+      # LayerNorm
+      mean = Nx.mean(x, axes: [-1], keep_axes: true)
+      var = Nx.variance(x, axes: [-1], keep_axes: true)
+      normed = Nx.multiply(Nx.multiply(Nx.subtract(x, mean), Nx.rsqrt(Nx.add(var, 1.0e-5))), gamma)
+      normed = Nx.add(normed, beta)
+
+      # Dense projections
+      f_pre = Nx.add(Nx.dot(normed, [2], w_f, [0]), b_f)
+      i_pre = Nx.add(Nx.dot(normed, [2], w_i, [0]), b_i)
+      c_pre = Nx.add(Nx.dot(normed, [2], w_h, [0]), b_h)
+
+      # Gate normalization
+      sig_f = Nx.sigmoid(f_pre)
+      sig_i = Nx.sigmoid(i_pre)
+      gate_sum = Nx.add(sig_f, Nx.add(sig_i, norm_eps))
+      f_norm = Nx.divide(sig_f, gate_sum)
+      i_norm = Nx.divide(sig_i, gate_sum)
+
+      # Per-layer scan
+      h_layer_init = Nx.slice_along_axis(h0, layer, 1, axis: 1) |> Nx.squeeze(axes: [1])
+
+      {_batch_size, seq_len, _hidden} = Nx.shape(f_norm)
+      {_, h_list} =
+        Enum.reduce(0..(seq_len - 1), {h_layer_init, []}, fn t, {h_prev, acc} ->
+          f_t = Nx.slice_along_axis(f_norm, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+          i_t = Nx.slice_along_axis(i_norm, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+          c_t = Nx.slice_along_axis(c_pre, t, 1, axis: 1) |> Nx.squeeze(axes: [1])
+          h_t = Nx.add(Nx.multiply(f_t, h_prev), Nx.multiply(i_t, c_t))
+          {h_t, [h_t | acc]}
+        end)
+      scan_out = h_list |> Enum.reverse() |> Nx.stack(axis: 1)
+
+      # Residual
+      Nx.add(x, scan_out)
+    end)
+  end
+
+  @doc false
+  def block_custom_call_available? do
+    exla_value = Module.concat([EXLA, MLIR, Value])
+
+    Code.ensure_loaded?(exla_value) and
+      function_exported?(exla_value, :fused_mingru_block_scan, 4)
+  rescue
+    _ -> false
   end
 
   # ============================================================================

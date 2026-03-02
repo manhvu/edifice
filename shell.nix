@@ -10,6 +10,10 @@ pkgs.mkShell {
     git
     tmux
 
+    # Rust (for ortex/rustler NIFs)
+    cargo
+    rustc
+
     # CUDA
     cuda.cuda_nvcc
     cuda.cuda_nvrtc

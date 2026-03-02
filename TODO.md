@@ -180,6 +180,28 @@ Full research notes in `notebooks/research/interpretability_architectures.md`.
   - **MIRAS** (Moneta variant) — Generalized Titans with data-dependent alpha/eta gates and L2 row normalization. Yaad/Memora variants fall back to Elixir.
   - **GSA** — Slot memory `[B,H,m,d]` with gated EMA write + softmax read per timestep. Thread per (batch,head,slot), mem in registers.
   - Not needed: Griffin RG-LRU (uses P1 `linear_scan`), HGRN (parallel log-cumsum-exp), InfiniAttention (segment-level, few iterations)
+- [ ] **CUDA Kernel Fusion (P5) — Backward-Pass Kernels** — Fused backward (gradient) kernels for training-time performance. Each forward scan has a corresponding reverse-time scan that accumulates gradients w.r.t. inputs and initial state. Without fused backward kernels, `Nx.Defn.value_and_grad` falls back to Elixir sequential scan for the backward pass even when the forward pass uses CUDA. Priority targets:
+  - **MinGRU / MinLSTM backward** — Reverse scan accumulating dL/dz, dL/dc, dL/dh0
+  - **Linear scan backward** — Covers Griffin, MEGA, SSTransformer, HybridBuilder, GSS, MambaVision
+  - **DeltaNet / GatedDeltaNet backward** — Matrix-state reverse scan with dL/dQ, dL/dK, dL/dV, dL/dbeta
+  - **LSTM / GRU backward** — BPTT with fused gate gradients
+  - **Selective scan backward** — Mamba training gradient kernel
+- [ ] **CUDA Kernel Fusion (P6) — bf16/f16 Kernel Variants** — Half-precision variants of all 19 existing kernels. Doubles memory bandwidth, roughly halves latency for bandwidth-bound kernels. Many ExPhil architectures are close to the 16ms target — bf16 could push them under. Requires: `__half` / `__nv_bfloat16` types, `__hmul`/`__hadd` intrinsics, mixed-precision accumulation (f32 accumulators with bf16 I/O) for numerical stability.
+- [ ] **CUDA Kernel Fusion (P7) — Matrix-State Linear Attention Family** — Fused kernels for RetNet, RWKV, GLA/GLA v2 recurrences. All are matrix-state scans similar to DeltaNet but with different update rules:
+  - **RetNet** — `S_t = gamma * S_{t-1} + k_t @ v_t^T`, fixed exponential decay
+  - **RWKV** — WKV mechanism with time-decay, similar structure to RetNet
+  - **GLA / GLA v2** — `S_t = G_t * S_{t-1} + k_t @ v_t^T`, per-head learned gating
+  - All adaptable from `fused_delta_rule_scan.cu` template with different update math
+- [ ] **CUDA Kernel Fusion (P8) — Flash Attention Variants** — Modified flash attention kernels for attention architectures with non-standard patterns:
+  - **FoX** — Flash attention + per-head learnable forget gate applied post-softmax
+  - **MoBA** — Sparse flash attention: MoE router selects KV blocks per query, only compute selected tiles
+  - **MTA** — Multi-Token Attention: conv over Q/K dims before attention scoring
+  - **LASER** — exp(V) transformation before dot-product attention
+  - **InfiniAttention** — Flash attention per chunk + cross-chunk compressive memory accumulation `M_t = M_{t-1} + sigma(K)^T @ V - sigma(K)^T @ (sigma(K) @ M_{t-1})`
+- [ ] **CUDA Kernel Fusion (P9) — Multi-Layer Fusion** — Keep hidden state in registers across consecutive layers instead of writing to global memory between layers. For a 2-layer MinGRU at seq=32, eliminates 2 global memory round-trips per inference. Could push already-fast architectures below 10ms. Requires fusing the inter-layer projection (dense matmul) into the scan kernel or using shared memory as a staging area.
+- [ ] **CUDA Kernel Fusion (P10) — Associative Memory Kernels** — Fused kernels for Hopfield and NTM per-step memory operations:
+  - **Hopfield** — Iterative energy-based memory retrieval with softmax attention over stored patterns
+  - **NTM** — Content + location-based addressing with read/write heads, shift convolution, and sharpening. High register pressure from multiple addressing modes.
 
 ## Open — Codebase Quality (from 2026-02-27 evaluation)
 

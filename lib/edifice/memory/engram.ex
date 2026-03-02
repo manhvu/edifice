@@ -357,16 +357,54 @@ defmodule Edifice.Memory.Engram do
   end
 
   # Axon layer implementation for differentiable read.
+  #
+  # Uses soft attention over buckets instead of hard hash-based lookup.
+  # The raw projections (before sign thresholding) produce a soft weight
+  # over each bucket via signed-distance scoring, keeping gradients alive
+  # through the hash_matrices parameter.
   defp engram_lookup_impl(query, memory_slots, hash_matrices, opts) do
     num_tables = opts[:num_tables]
     hash_bits = opts[:hash_bits]
     batch_size = Nx.axis_size(query, 0)
-    value_dim = Nx.axis_size(memory_slots, 2)
+    num_buckets = Nx.axis_size(memory_slots, 1)
+    key_dim = Nx.axis_size(query, 1)
 
-    bucket_indices =
-      compute_bucket_indices(query, hash_matrices, batch_size, hash_bits, num_tables)
+    # Raw projections: [T, B, hash_bits]
+    query_bc = Nx.broadcast(Nx.new_axis(query, 0), {num_tables, batch_size, key_dim})
+    projections = Nx.dot(query_bc, [2], [0], hash_matrices, [2], [0])
 
-    results = gather_slots(memory_slots, bucket_indices, batch_size, value_dim)
+    # Build soft bucket weights using signed-distance scoring.
+    # Each bucket is identified by its bit pattern. We compute how well
+    # the raw projection aligns with each bucket's expected sign pattern,
+    # then softmax to get differentiable weights.
+    #
+    # bucket_signs[b, h] = +1 if bit h of bucket b is set, -1 otherwise
+    # score[t, batch, b] = sum_h(projection[t, batch, h] * bucket_signs[b, h])
+    bucket_ids = Nx.iota({num_buckets}, type: :s32)
+
+    bucket_signs =
+      Enum.map(0..(hash_bits - 1), fn bit ->
+        # Check if bit `bit` is set in each bucket index
+        has_bit = Nx.bitwise_and(Nx.right_shift(bucket_ids, bit), 1)
+        # Map 0 → -1, 1 → +1
+        Nx.subtract(Nx.multiply(has_bit, 2), 1) |> Nx.as_type(:f32)
+      end)
+      |> Nx.stack(axis: 1)
+
+    # bucket_signs: [num_buckets, hash_bits]
+    # projections: [T, B, hash_bits]
+    # Score = projections @ bucket_signs^T → [T, B, num_buckets]
+    scores = Nx.dot(projections, [2], bucket_signs, [1])
+
+    # Softmax over buckets to get soft weights
+    max_scores = Nx.reduce_max(scores, axes: [2], keep_axes: true)
+    exp_scores = Nx.exp(Nx.subtract(scores, max_scores))
+    weights = Nx.divide(exp_scores, Nx.sum(exp_scores, axes: [2], keep_axes: true))
+
+    # Soft gather: [T, B, num_buckets] × [T, num_buckets, V] → [T, B, V]
+    results = Nx.dot(weights, [2], [0], memory_slots, [1], [0])
+
+    # Average across tables: [T, B, V] → [B, V]
     Nx.mean(results, axes: [0])
   end
 end

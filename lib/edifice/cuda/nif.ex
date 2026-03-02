@@ -188,4 +188,17 @@ defmodule Edifice.CUDA.NIF do
   @doc false
   def fused_selective_scan_backward(_x, _dt, _a, _b, _c, _grad, _batch, _seq, _hidden, _state, _dtype),
     do: :erlang.nif_error(:not_loaded)
+
+  # Phase 4 backward kernels
+  @doc false
+  def fused_kda_scan_backward(_q, _k, _v, _alpha, _beta, _fwd, _grad, _batch, _seq, _heads, _head_dim, _dtype),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_rla_scan_backward(_q, _k, _v, _alpha, _beta, _gamma, _fwd, _grad, _batch, _seq, _heads, _head_dim, _variant, _clip, _dtype),
+    do: :erlang.nif_error(:not_loaded)
+
+  @doc false
+  def fused_ttt_scan_backward(_q, _k, _v, _eta, _w0, _lng, _lnb, _grad, _batch, _seq, _inner, _dtype),
+    do: :erlang.nif_error(:not_loaded)
 end

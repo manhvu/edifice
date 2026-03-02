@@ -63,6 +63,9 @@ KERNEL_SOURCES := fused_mingru_scan.cu fused_minlstm_scan.cu \
                   fused_delta_product_scan_backward.cu \
                   fused_slstm_scan_backward.cu \
                   fused_selective_scan_backward.cu \
+                  fused_kda_scan_backward.cu \
+                  fused_rla_scan_backward.cu \
+                  fused_ttt_scan_backward.cu \
                   fused_mingru_block_scan.cu \
                   fused_minlstm_block_scan.cu
 

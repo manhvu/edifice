@@ -325,6 +325,6 @@ See `docs/cuda_custom_call_debugging.md` for the full debugging methodology and 
 - [x] **Investigate `Omitted potentially buggy algorithm eng14{k25=2} for conv` info messages** — Investigated: cuDNN 9.x harmlessly skips algorithm variants during autotuning. Info-level messages from XLA C++ bridged via EXLA.Logger. Already suppressed in tests (`Logger.configure(level: :warning)` in test_helper.exs). Added same suppression to all bench scripts.
 
 ### ML-Specific Quality (Priority: Low)
-- [ ] **ONNX integration guide** — Document workflow: Edifice.build → Axon model → axon_onnx export → inference in other runtimes. Even if axon_onnx is a separate package, showing the integration path is valuable.
+- [x] **ONNX integration guide** — `guides/onnx_integration.md`. Covers axon_onnx export/import, ortex (ONNX Runtime bindings), when to use which, Edifice-specific limitations (custom kernels export via fallback), and troubleshooting.
 - [x] **Architecture visualization** — `mix edifice.viz mamba` prints layer structure as table (default), ASCII tree (`--format tree`), or Mermaid diagram (`--format mermaid`). Handles tuple-returning models via `--component`. See `Edifice.Display` module.
 - [x] **Gradient smoke tests** — 176 passing tests across all 26 families (analytical gradients via `value_and_grad` + parameter sensitivity fallback). Covers sequence models, transformers, vision, detection, audio, robotics, RL, generative, graph, meta/PEFT, contrastive, interpretability, world model, multimodal, scientific, and memory architectures.

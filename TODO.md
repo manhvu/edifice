@@ -164,7 +164,7 @@ Full research notes in `notebooks/research/interpretability_architectures.md`.
 - [x] GPS — General Powerful Scalable graph transformer (GIN MPNN + global attention dual-branch with RWSE PE)
 - [ ] Agent swarm patterns — Multi-agent coordination building blocks (see `notebooks/research/agent_swarm_patterns.md`)
   - [x] **AgentSwarm** — Communication-augmented ensemble. N proposers + R rounds of inter-agent cross-attention + aggregator. Differentiable "debate" pattern.
-  - [ ] **RouterNetwork** — Learned input-level dispatch to specialist models. Soft (weighted sum) and hard (top-k straight-through) routing.
+  - [x] **RouterNetwork** — Learned input-level dispatch to specialist models. Soft (weighted sum) and hard (top-k straight-through) routing.
   - [ ] **StatefulAgent** — Multi-turn wrapper pairing any architecture with persistent state (compressive/episodic/matrix memory).
   - [ ] **MessagePassingAgents** — GNN-inspired agent graph. Agents as nodes, communication as edges, GRU state updates.
   - [ ] **Re-evaluate agent swarm direction** — After modules above are done, assess: coverage gaps, integration patterns, whether a higher-level orchestration layer makes sense.

@@ -17,6 +17,14 @@ defmodule Edifice.CUDA.FusedScan do
   # Memory management (NIF path only): The NIF returns a gc_ref (NIF
   # resource) alongside the output pointer. This gc_ref calls cudaFree
   # when garbage collected.
+  #
+  # Known Limitations:
+  # - Flash Attention custom call always uses causal=1. The `:causal` option
+  #   is respected by the NIF and fallback paths, but the EXLA custom call
+  #   path hardcodes causal=1 to avoid a scalar operand segfault in XLA.
+  #   Non-causal flash attention falls back to NIF or Elixir.
+  # - LASER Attention custom call: same limitation, hardcoded causal=1.
+  # - See docs/cuda_custom_call_debugging.md for technical details.
 
   @gc_refs_key :__edifice_cuda_gc_refs__
 
@@ -1719,9 +1727,13 @@ defmodule Edifice.CUDA.FusedScan do
         ds_k = Nx.dot(ds_total, [3], [0, 1], Nx.new_axis(k_t, -1), [2], [0, 1]) |> Nx.squeeze(axes: [-1])
         dr_k = Nx.dot(dr_total, [3], [0, 1], Nx.new_axis(k_t, -1), [2], [0, 1]) |> Nx.squeeze(axes: [-1])
 
+        # Squeeze gate scalars from [B, H, 1, 1] to [B, H, 1] for broadcasting with [B, H, d]
+        beta_v = Nx.reshape(beta_t, {batch, num_heads, 1})
+        gamma_v = Nx.reshape(gamma_t, {batch, num_heads, 1})
+
         gv_t = case update_info do
-          :rla -> Nx.add(Nx.multiply(beta_t, ds_k), Nx.multiply(Nx.multiply(gamma_t, dr_k), clip_mask))
-          {:rdn, _, _, _} -> Nx.add(Nx.multiply(beta_t, ds_k), Nx.multiply(Nx.multiply(gamma_t, dr_k), clip_mask))
+          :rla -> Nx.add(Nx.multiply(beta_v, ds_k), Nx.multiply(Nx.multiply(gamma_v, dr_k), clip_mask))
+          {:rdn, _, _, _} -> Nx.add(Nx.multiply(beta_v, ds_k), Nx.multiply(Nx.multiply(gamma_v, dr_k), clip_mask))
         end
 
         gk_t = Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_heads, head_dim})
@@ -3313,6 +3325,9 @@ defmodule Edifice.CUDA.FusedScan do
   Uses tiled loading with online softmax to avoid materializing the full
   [seq, seq] attention matrix. Produces identical results to standard SDPA.
 
+  > **Note:** The EXLA custom call path always uses causal masking.
+  > Non-causal attention uses the NIF or Elixir fallback path.
+
   ## Arguments
 
     * `q` - Query tensor `[batch, heads, seq, head_dim]` (f32)
@@ -3329,7 +3344,8 @@ defmodule Edifice.CUDA.FusedScan do
     causal = if Keyword.get(opts, :causal, false), do: 1, else: 0
 
     cond do
-      flash_attention_custom_call_available?() ->
+      # Custom call path only supports causal=1 (hardcoded to avoid scalar operand segfault)
+      causal == 1 and flash_attention_custom_call_available?() ->
         flash_attention_custom_call(q, k, v, causal)
 
       cuda_available?(q) ->
@@ -3510,6 +3526,9 @@ defmodule Edifice.CUDA.FusedScan do
 
   Uses the LWSE trick: subtract `v_max` before exp, add back after log.
 
+  > **Note:** The EXLA custom call path always uses causal masking.
+  > Non-causal attention uses the NIF or Elixir fallback path.
+
   ## Arguments
 
     * `q` - Query tensor `[batch, heads, seq, head_dim]` (f32)
@@ -3529,7 +3548,8 @@ defmodule Edifice.CUDA.FusedScan do
     v_max = Nx.reduce_max(v, axes: [2], keep_axes: true)
 
     cond do
-      laser_attention_custom_call_available?() ->
+      # Custom call path only supports causal=1 (hardcoded to avoid scalar operand segfault)
+      causal == 1 and laser_attention_custom_call_available?() ->
         laser_attention_custom_call(q, k, v, v_max, causal)
 
       cuda_available?(q) ->
@@ -3996,7 +4016,8 @@ defmodule Edifice.CUDA.FusedScan do
     end
   end
 
-  defp reservoir_scan_fallback(wx, w_res, leak_rate) do
+  @doc false
+  def reservoir_scan_fallback(wx, w_res, leak_rate) do
     {batch, seq_len, hidden} = Nx.shape(wx)
     h = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(wx)), {batch, hidden})
 
@@ -4047,10 +4068,14 @@ defmodule Edifice.CUDA.FusedScan do
     {batch, seq_len, _} = Nx.shape(combined)
     tensor_type = Nx.type(combined)
     output = Nx.template({batch, seq_len, memory_size}, tensor_type)
-    momentum_tensor = Nx.tensor(momentum, type: tensor_type)
 
-    Nx.Shared.optional(:fused_titans_scan, [combined, momentum_tensor], output, fn combined, _mom ->
-      titans_scan_fallback(combined, memory_size, momentum)
+    # Pack momentum into combined: [B,T,4*M] → [B,T,4*M+1]
+    momentum_col = Nx.broadcast(Nx.tensor(momentum, type: tensor_type), {batch, seq_len, 1})
+    packed = Nx.concatenate([combined, momentum_col], axis: 2)
+
+    Nx.Shared.optional(:fused_titans_scan, [packed], output, fn packed ->
+      combined_inner = Nx.slice_along_axis(packed, 0, memory_size * 4, axis: 2)
+      titans_scan_fallback(combined_inner, memory_size, momentum)
     end)
   end
 
@@ -4150,10 +4175,14 @@ defmodule Edifice.CUDA.FusedScan do
     {batch, seq_len, _} = Nx.shape(combined)
     tensor_type = Nx.type(combined)
     output = Nx.template({batch, seq_len, memory_size}, tensor_type)
-    momentum_tensor = Nx.tensor(momentum, type: tensor_type)
 
-    Nx.Shared.optional(:fused_miras_scan, [combined, momentum_tensor], output, fn combined, _mom ->
-      miras_scan_fallback(combined, memory_size, momentum)
+    # Pack momentum into combined: [B,T,5*M] → [B,T,5*M+1]
+    momentum_col = Nx.broadcast(Nx.tensor(momentum, type: tensor_type), {batch, seq_len, 1})
+    packed = Nx.concatenate([combined, momentum_col], axis: 2)
+
+    Nx.Shared.optional(:fused_miras_scan, [packed], output, fn packed ->
+      combined_inner = Nx.slice_along_axis(packed, 0, memory_size * 5, axis: 2)
+      miras_scan_fallback(combined_inner, memory_size, momentum)
     end)
   end
 

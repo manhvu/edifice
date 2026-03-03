@@ -16,7 +16,9 @@
 // Shared memory used for k, v, gate vectors and reductions.
 //
 // Inputs:
-//   combined: [batch, seq_len, 4*memory_size] — concatenated Q, K, V, gate_input
+//   combined: [batch, seq_len, combined_stride] — concatenated Q, K, V, gate_input
+//     NIF path:  combined_stride = 4*M (momentum passed separately)
+//     FFI path:  combined_stride = 4*M+1 (momentum packed as extra column)
 //   momentum: scalar float                    — momentum coefficient
 //
 // Output:
@@ -28,10 +30,10 @@
 #define TITANS_MAX_MEM 128
 
 __global__ void fused_titans_scan_kernel(
-    const io_type* __restrict__ combined,  // [B, T, 4*M]
+    const io_type* __restrict__ combined,  // [B, T, combined_stride]
     io_type* __restrict__ output,          // [B, T, M]
     int batch, int seq_len, int mem_size,
-    float momentum
+    float momentum, int combined_stride
 ) {
     int b = blockIdx.x;
     int i = threadIdx.x;  // output dimension index (row of M)
@@ -39,14 +41,11 @@ __global__ void fused_titans_scan_kernel(
     if (b >= batch || i >= mem_size) return;
 
     // Shared memory layout:
-    // k_shared[M] + v_shared[M] + gate_shared[M] + reduce_shared[1]
     extern __shared__ float shared_mem[];
     float* k_shared     = shared_mem;                    // [M]
     float* v_shared     = shared_mem + mem_size;         // [M]
     float* gate_shared  = shared_mem + 2 * mem_size;     // [M]
     float* reduce_shared = shared_mem + 3 * mem_size;    // [1]
-
-    int combined_stride = 4 * mem_size;
 
     // M[i][j] in registers (row i of memory matrix)
     float M_row[TITANS_MAX_MEM];
@@ -65,7 +64,7 @@ __global__ void fused_titans_scan_kernel(
         gate_shared[i] = IO_LOAD(combined, base + 3 * mem_size + i);  // gate offset
         __syncthreads();
 
-        // Step 1: pred_i = M[i,:] @ k (dot product row i with k)
+        // Step 1: pred_i = M[i,:] @ k
         float pred_i = 0.0f;
         for (int j = 0; j < mem_size; j++) {
             pred_i += M_row[j] * k_shared[j];
@@ -74,12 +73,9 @@ __global__ void fused_titans_scan_kernel(
         // Step 2: error_i = pred_i - v_i
         float error_i = pred_i - v_shared[i];
 
-        // Step 3: Compute surprise = mean(error^2) via shared reduction
-        // Each thread contributes error_i^2 / mem_size
+        // Step 3: Compute surprise = mean(error^2)
         float local_sq = error_i * error_i;
 
-        // Parallel reduction for mean(error^2)
-        // Use k_shared as temp (we're done reading k)
         k_shared[i] = local_sq;
         __syncthreads();
 
@@ -94,12 +90,11 @@ __global__ void fused_titans_scan_kernel(
 
         float surprise = reduce_shared[0];
 
-        // Step 4: Surprise gate: sigmoid(gate_input + log(surprise + eps))
+        // Step 4: Surprise gate
         float surprise_log = logf(surprise + 1.0e-6f);
         float gate_val = 1.0f / (1.0f + expf(-(gate_shared[i] + surprise_log)));
 
-        // Step 5: Gradient = error_i * k^T (rank-1 update to row i)
-        // Reload k since we used k_shared as temp
+        // Step 5: Reload k since we used k_shared as temp
         __syncthreads();
         k_shared[i] = IO_LOAD(combined, base + mem_size + i);
         __syncthreads();
@@ -112,7 +107,6 @@ __global__ void fused_titans_scan_kernel(
         }
 
         // Step 7: Output o_i = M_updated[i,:] @ q
-        // Load q into shared (reuse k_shared)
         __syncthreads();
         k_shared[i] = IO_LOAD(combined, base + i);  // Q at offset 0
         __syncthreads();
@@ -141,15 +135,15 @@ int fused_titans_scan_launch(
     int batch, int seq_len, int mem_size,
     float momentum
 ) {
-    int threads_per_block = mem_size;  // one thread per output dim
+    int threads_per_block = mem_size;
+    int combined_stride = 4 * mem_size;
     dim3 grid(batch);
     dim3 block(threads_per_block);
-    // k + v + gate + reduce
     size_t smem_bytes = (3 * mem_size + 1) * sizeof(float);
 
     fused_titans_scan_kernel<<<grid, block, smem_bytes, stream>>>(
         combined, output,
-        batch, seq_len, mem_size, momentum
+        batch, seq_len, mem_size, momentum, combined_stride
     );
 
     return (int)cudaGetLastError();
@@ -169,18 +163,31 @@ int fused_titans_scan_launch(
 
 namespace ffi = xla::ffi;
 
+// 1 operand: packed tensor [B, T, 4*M+1] with momentum in the extra column.
+// This avoids the scalar buffer operand segfault in XLA while still
+// passing the actual momentum value configured by the user.
 ffi::Error fused_titans_scan_ffi_impl(
     cudaStream_t stream,
-    ffi::Buffer<FFI_IO_TYPE> combined,     // [B, T, 4*M]
-    ffi::Buffer<ffi::F32> momentum_t,   // scalar [1]
+    ffi::Buffer<FFI_IO_TYPE> combined,     // [B, T, 4*M+1]
     ffi::ResultBuffer<FFI_IO_TYPE> output  // [B, T, M]
 ) {
     auto dims = combined.dimensions();
     int batch    = static_cast<int>(dims[0]);
     int seq_len  = static_cast<int>(dims[1]);
-    int mem_size = static_cast<int>(dims[2]) / 4;
+    int combined_stride = static_cast<int>(dims[2]);  // 4*M+1
+    int mem_size = (combined_stride - 1) / 4;
 
-    float momentum = reinterpret_cast<const float*>(momentum_t.untyped_data())[0];
+    // Read momentum from packed tensor (last column of first row)
+    const io_type* combined_ptr = reinterpret_cast<const io_type*>(combined.untyped_data());
+    io_type momentum_raw;
+    cudaMemcpyAsync(&momentum_raw, combined_ptr + 4 * mem_size,
+                    sizeof(io_type), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+#ifdef USE_BF16
+    float momentum = __bfloat162float(momentum_raw);
+#else
+    float momentum = momentum_raw;
+#endif
 
     if (mem_size > TITANS_MAX_MEM) {
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
@@ -193,9 +200,9 @@ ffi::Error fused_titans_scan_ffi_impl(
     size_t smem_bytes = (3 * mem_size + 1) * sizeof(float);
 
     fused_titans_scan_kernel<<<grid, block, smem_bytes, stream>>>(
-        reinterpret_cast<const io_type*>(combined.untyped_data()),
+        combined_ptr,
         reinterpret_cast<io_type*>(output->untyped_data()),
-        batch, seq_len, mem_size, momentum
+        batch, seq_len, mem_size, momentum, combined_stride
     );
 
     cudaError_t err = cudaGetLastError();
@@ -211,7 +218,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // combined
-        .Arg<ffi::Buffer<ffi::F32>>()   // momentum
         .Ret<ffi::Buffer<FFI_IO_TYPE>>()   // output
 );
 

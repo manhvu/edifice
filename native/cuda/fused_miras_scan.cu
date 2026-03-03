@@ -16,7 +16,9 @@
 // Each thread holds row i of M and momentum matrices in registers.
 //
 // Inputs:
-//   combined: [batch, seq_len, 5*memory_size] — concatenated Q, K, V, alpha, eta
+//   combined: [batch, seq_len, combined_stride] — concatenated Q, K, V, alpha, eta
+//     NIF path:  combined_stride = 5*M (momentum passed separately)
+//     FFI path:  combined_stride = 5*M+1 (momentum packed as extra column)
 //   momentum: scalar float                    — momentum coefficient
 //
 // Output:
@@ -28,24 +30,23 @@
 #define MIRAS_MAX_MEM 128
 
 __global__ void fused_miras_scan_kernel(
-    const io_type* __restrict__ combined,  // [B, T, 5*M]
+    const io_type* __restrict__ combined,  // [B, T, combined_stride]
     io_type* __restrict__ output,          // [B, T, M]
     int batch, int seq_len, int mem_size,
-    float momentum
+    float momentum, int combined_stride
 ) {
     int b = blockIdx.x;
     int i = threadIdx.x;  // output dimension index (row of M)
 
     if (b >= batch || i >= mem_size) return;
 
-    // Shared memory: k[M] + v[M] + alpha[M] + eta[M]
+    // Shared memory: k[M] + v[M] + alpha[M] + eta[M] + reduce[1]
     extern __shared__ float shared_mem[];
     float* k_shared     = shared_mem;                       // [M]
     float* v_shared     = shared_mem + mem_size;            // [M]
     float* alpha_shared = shared_mem + 2 * mem_size;        // [M]
     float* eta_shared   = shared_mem + 3 * mem_size;        // [M]
-
-    int combined_stride = 5 * mem_size;
+    float* reduce_shared = shared_mem + 4 * mem_size;       // [1]
 
     // M[i][j] and momentum in registers
     float M_row[MIRAS_MAX_MEM];
@@ -87,7 +88,6 @@ __global__ void fused_miras_scan_kernel(
         }
 
         // Step 5: L2 row normalization (Moneta variant)
-        // norm_i = sqrt(sum_j(M[i][j]^2))
         float row_norm_sq = 0.0f;
         for (int j = 0; j < mem_size; j++) {
             row_norm_sq += M_row[j] * M_row[j];
@@ -101,7 +101,6 @@ __global__ void fused_miras_scan_kernel(
         }
 
         // Step 6: Output o_i = M[i,:] @ q
-        // Load q into shared (reuse k_shared)
         __syncthreads();
         k_shared[i] = IO_LOAD(combined, base + i);  // Q at offset 0
         __syncthreads();
@@ -131,14 +130,14 @@ int fused_miras_scan_launch(
     float momentum
 ) {
     int threads_per_block = mem_size;
+    int combined_stride = 5 * mem_size;
     dim3 grid(batch);
     dim3 block(threads_per_block);
-    // k + v + alpha + eta + reduce
-    size_t smem_bytes = 4 * mem_size * sizeof(float);
+    size_t smem_bytes = (4 * mem_size + 1) * sizeof(float);
 
     fused_miras_scan_kernel<<<grid, block, smem_bytes, stream>>>(
         combined, output,
-        batch, seq_len, mem_size, momentum
+        batch, seq_len, mem_size, momentum, combined_stride
     );
 
     return (int)cudaGetLastError();
@@ -158,18 +157,31 @@ int fused_miras_scan_launch(
 
 namespace ffi = xla::ffi;
 
+// 1 operand: packed tensor [B, T, 5*M+1] with momentum in the extra column.
+// This avoids the scalar buffer operand segfault in XLA while still
+// passing the actual momentum value configured by the user.
 ffi::Error fused_miras_scan_ffi_impl(
     cudaStream_t stream,
-    ffi::Buffer<FFI_IO_TYPE> combined,     // [B, T, 5*M]
-    ffi::Buffer<ffi::F32> momentum_t,   // scalar [1]
+    ffi::Buffer<FFI_IO_TYPE> combined,     // [B, T, 5*M+1]
     ffi::ResultBuffer<FFI_IO_TYPE> output  // [B, T, M]
 ) {
     auto dims = combined.dimensions();
     int batch    = static_cast<int>(dims[0]);
     int seq_len  = static_cast<int>(dims[1]);
-    int mem_size = static_cast<int>(dims[2]) / 5;
+    int combined_stride = static_cast<int>(dims[2]);  // 5*M+1
+    int mem_size = (combined_stride - 1) / 5;
 
-    float momentum = reinterpret_cast<const float*>(momentum_t.untyped_data())[0];
+    // Read momentum from packed tensor (last column of first row)
+    const io_type* combined_ptr = reinterpret_cast<const io_type*>(combined.untyped_data());
+    io_type momentum_raw;
+    cudaMemcpyAsync(&momentum_raw, combined_ptr + 5 * mem_size,
+                    sizeof(io_type), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+#ifdef USE_BF16
+    float momentum = __bfloat162float(momentum_raw);
+#else
+    float momentum = momentum_raw;
+#endif
 
     if (mem_size > MIRAS_MAX_MEM) {
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
@@ -179,12 +191,12 @@ ffi::Error fused_miras_scan_ffi_impl(
     int threads_per_block = mem_size;
     dim3 grid(batch);
     dim3 block(threads_per_block);
-    size_t smem_bytes = 4 * mem_size * sizeof(float);
+    size_t smem_bytes = (4 * mem_size + 1) * sizeof(float);
 
     fused_miras_scan_kernel<<<grid, block, smem_bytes, stream>>>(
-        reinterpret_cast<const io_type*>(combined.untyped_data()),
+        combined_ptr,
         reinterpret_cast<io_type*>(output->untyped_data()),
-        batch, seq_len, mem_size, momentum
+        batch, seq_len, mem_size, momentum, combined_stride
     );
 
     cudaError_t err = cudaGetLastError();
@@ -200,7 +212,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // combined
-        .Arg<ffi::Buffer<ffi::F32>>()   // momentum
         .Ret<ffi::Buffer<FFI_IO_TYPE>>()   // output
 );
 

@@ -1,0 +1,33 @@
+{
+  "architectures": {
+    "detr": {
+      "median_ns": 231650625,
+      "ips": 4.32
+    },
+    "gqa": {
+      "median_ns": 22517879,
+      "ips": 43.19
+    },
+    "lstm": {
+      "median_ns": 15676414,
+      "ips": 63.45
+    },
+    "mamba": {
+      "median_ns": 38061970,
+      "ips": 25.2
+    },
+    "min_gru": {
+      "median_ns": 6534118,
+      "ips": 150.32
+    },
+    "mlp": {
+      "median_ns": 299252,
+      "ips": 3097.54
+    },
+    "vit": {
+      "median_ns": 47511548,
+      "ips": 20.97
+    }
+  },
+  "generated_at": "2026-03-03T09:30:50.563047Z"
+}

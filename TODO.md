@@ -254,7 +254,7 @@ have dedicated test files. Remaining gaps are leaf modules or minor variants.
 ### Documentation — Guides & Notebooks (Priority: Medium)
 
 - [x] **Composition guide** — `guides/composing_architectures.md`. Covers TransformerBlock callbacks (attention_fn, cross_attention_fn, custom_ffn), ModelBuilder skeletons (sequence + vision), shared blocks table, and 3 composition recipes (custom attention, hybrid encoder-decoder, SSM+attention interleaving).
-- [ ] **Livebook notebooks** — Create 3-5 `.livemd` notebooks: (1) "Build your first model" — walk through build/init/predict cycle, (2) "Architecture comparison" — benchmark 5 architectures on same task, (3) "Custom architecture from blocks" — compose a novel model from shared blocks, (4) "Whisper ASR demo" — end-to-end encoder-decoder usage, (5) "Training a small model" — connect to Axon training loop.
+- [x] **Livebook notebooks** — 13 notebooks: training_mlp, architecture_zoo, architecture_comparison, lm_architecture_shootout, sequence_modeling, graph_classification, generative_models, small_language_model, liquid_neural_networks, softmax_shootout, agent_swarm_patterns, composing_from_blocks, whisper_asr_demo.
 - [x] **CODE_OF_CONDUCT.md** — Contributor Covenant v2.1, downloaded from contributor-covenant.org.
 
 ### Module Decomposition (Priority: Low-Medium)
@@ -264,8 +264,7 @@ have dedicated test files. Remaining gaps are leaf modules or minor variants.
 
 ### CI/CD Improvements (Priority: Medium)
 
-- [ ] **Multi-version test matrix** (deferred) — Test against Elixir 1.18 + 1.19 + 1.20 on OTP 27 + 28. Low priority — revisit when upstream breakage is observed.
-- [ ] **Benchmark regression CI** — Run Benchee on 5-10 key architectures in CI. Store baseline timings, fail if >10% regression. Candidate architectures: MLP, LSTM, Mamba, GQA, ViT, DETR (covers major families and input patterns).
+- [x] **Benchmark regression CI** — Run Benchee on 7 key architectures (MLP, LSTM, Mamba, GQA, MinGRU, ViT, DETR) in CI. Baseline in `bench/results/ci_baseline.json`, 20% threshold for shared runner variance. `bench/regression_ci.exs` + CI job parallel to test pipeline.
 - [x] **Normalize git tag format** — All tags now use `v` prefix (`v0.1.1`, `v0.2.0`).
 
 ### Pretrained Weight Loading (Priority: Medium)

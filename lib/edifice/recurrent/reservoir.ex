@@ -109,9 +109,12 @@ defmodule Edifice.Recurrent.Reservoir do
     w_res_data = Nx.multiply(w_res_data, scale)
 
     # Reservoir dynamics: input projection + recurrent scan
-    # Uses Axon.nx with closure-captured frozen weights. Axon.constant nodes
-    # pass concrete tensors into callbacks, which Nx.Shared.optional can't
-    # trace for custom_call dispatch. Closure capture + Axon.nx avoids this.
+    # Uses Axon.nx with closure-captured frozen weights. Must copy to BinaryBackend
+    # so EXLA can inline them as constants in the compiled graph (avoids
+    # "incompatible tensor implementations: Nx.Defn.Expr and EXLA.Backend" error).
+    w_in_const = Nx.backend_copy(w_in_data, Nx.BinaryBackend)
+    w_res_const = Nx.backend_copy(w_res_data, Nx.BinaryBackend)
+
     reservoir_output =
       Axon.nx(
         input,
@@ -121,10 +124,10 @@ defmodule Edifice.Recurrent.Reservoir do
 
           # Pre-compute W_in @ x for all timesteps: [batch, seq_len, reservoir_size]
           input_2d = Nx.reshape(x, {batch_size * s_len, Nx.axis_size(x, 2)})
-          wx = Nx.dot(input_2d, w_in_data) |> Nx.reshape({batch_size, s_len, reservoir_size})
+          wx = Nx.dot(input_2d, w_in_const) |> Nx.reshape({batch_size, s_len, reservoir_size})
 
           # Reservoir scan (fallback path — EXLA compiles Nx ops to XLA graph directly)
-          Edifice.CUDA.FusedScan.reservoir_scan_fallback(wx, w_res_data, leak_rate)
+          Edifice.CUDA.FusedScan.reservoir_scan_fallback(wx, w_res_const, leak_rate)
         end,
         name: "reservoir"
       )

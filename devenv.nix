@@ -62,6 +62,7 @@ in
   # Library path for CUDA
   env.LD_LIBRARY_PATH = lib.makeLibraryPath [
     pkgs.stdenv.cc.cc.lib
+    pkgs.zlib
     cuda.cuda_cudart
     cuda.cuda_nvrtc
     cuda.cudnn

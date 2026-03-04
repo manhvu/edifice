@@ -67,9 +67,9 @@ def generate_whisper_encoder_fixture():
     """Generate Whisper encoder forward pass reference.
 
     Model: openai/whisper-base
-    Input: deterministic mel spectrogram [1, 80, 100] via torch.manual_seed(42)
-    Output: encoder hidden states [1, 50, 512]
-        (100 mel frames -> 50 after stride-2 convolution)
+    Input: deterministic mel spectrogram [1, 80, 3000] via torch.manual_seed(42)
+    Output: encoder hidden states [1, 1500, 512]
+        (3000 mel frames -> 1500 after stride-2 convolution)
     """
     from transformers import WhisperModel
 
@@ -77,9 +77,9 @@ def generate_whisper_encoder_fixture():
     model = WhisperModel.from_pretrained("openai/whisper-base")
     model.eval()
 
-    # Deterministic mel input (shorter than full 3000 frames for fixture size)
+    # Deterministic mel input (Whisper requires exactly 3000 frames)
     torch.manual_seed(42)
-    mel_input = torch.randn(1, 80, 100)
+    mel_input = torch.randn(1, 80, 3000)
 
     print("Running Whisper encoder forward pass...")
     with torch.no_grad():
@@ -247,9 +247,22 @@ def generate_detr_fixture():
 
 
 if __name__ == "__main__":
-    generate_vit_fixture()
-    generate_whisper_encoder_fixture()
-    generate_convnext_fixture()
-    generate_resnet_fixture()
-    generate_detr_fixture()
-    print("\nAll fixtures generated successfully!")
+    generators = [
+        ("ViT", generate_vit_fixture),
+        ("Whisper", generate_whisper_encoder_fixture),
+        ("ConvNeXt", generate_convnext_fixture),
+        ("ResNet", generate_resnet_fixture),
+        ("DETR", generate_detr_fixture),
+    ]
+    failed = []
+    for name, fn in generators:
+        try:
+            fn()
+        except Exception as e:
+            print(f"\nFAILED {name}: {e}")
+            failed.append(name)
+    if failed:
+        print(f"\n{len(failed)} fixture(s) failed: {', '.join(failed)}")
+        sys.exit(1)
+    else:
+        print("\nAll fixtures generated successfully!")

@@ -64,7 +64,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
 
       # Build and run forward pass
-      {predict_fn, _} = Axon.build(model, mode: :inference)
+      {_init_fn, predict_fn} = Axon.build(model, mode: :inference)
       output = predict_fn.(params, %{"image" => input})
 
       # Compare against PyTorch reference
@@ -74,6 +74,9 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
 
   describe "ConvNeXt forward pass" do
     @tag timeout: 120_000
+    @tag :skip
+    # Skipped: facebook/convnext-tiny-224 only has pytorch_model.bin (no safetensors).
+    # ConvNeXt is validated via random-weight tests in architecture_numerical_test.exs.
     test "matches PyTorch reference output" do
       fixture_file = "convnext_reference.safetensors"
 
@@ -101,7 +104,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
 
       # Build and run forward pass
-      {predict_fn, _} = Axon.build(model, mode: :inference)
+      {_init_fn, predict_fn} = Axon.build(model, mode: :inference)
       output = predict_fn.(params, %{"image" => input})
 
       # Compare against PyTorch reference
@@ -141,7 +144,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
 
       # Build and run forward pass
-      {predict_fn, _} = Axon.build(model, mode: :inference)
+      {_init_fn, predict_fn} = Axon.build(model, mode: :inference)
       output = predict_fn.(params, %{"input" => input})
 
       # Compare against PyTorch reference
@@ -169,7 +172,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
       expected_class_logits = fixture["expected_class_logits"]
       expected_bbox_pred = fixture["expected_bbox_pred"]
 
-      {1, 3, h, w} = Nx.shape(input_nchw)
+      {1, 3, h, _w} = Nx.shape(input_nchw)
 
       # Transpose NCHW → NHWC for Edifice
       input = Nx.transpose(input_nchw, axes: [0, 2, 3, 1])
@@ -185,7 +188,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
 
       # Build and run forward pass
-      {predict_fn, _} = Axon.build(model, mode: :inference)
+      {_init_fn, predict_fn} = Axon.build(model, mode: :inference)
       output = predict_fn.(params, %{"image" => input})
 
       # Compare against PyTorch reference
@@ -213,7 +216,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
       mel_input = fixture["mel_input"]
       expected_output = fixture["expected_encoder_output"]
 
-      assert Nx.shape(mel_input) == {1, 80, 100}
+      assert Nx.shape(mel_input) == {1, 80, 3000}
 
       # Load real pretrained weights
       {encoder, _decoder, params} =
@@ -221,7 +224,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
 
       # Build encoder and run forward pass
       {predict_fn, _} = Axon.build(encoder, mode: :inference)
-      output = predict_fn.(params, %{"mel" => mel_input})
+      output = predict_fn.(params, %{"mel_spectrogram" => mel_input})
 
       # Compare against PyTorch reference
       assert_all_close(output, expected_output, atol: 1.0e-4)

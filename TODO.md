@@ -356,18 +356,18 @@ See `docs/cuda_custom_call_debugging.md` for the full debugging methodology and 
 ### Phase 1 — Trust & Usability (Priority: High)
 
 #### Numerical Correctness Suite
-Expand PyTorch reference validation beyond ViT/Whisper to 10 key architectures. Pre-generate fixtures via `scripts/generate_numerical_fixtures.py`, compare forward pass at `atol=1e-4`. Gradient validation for architectures with CUDA backward kernels. See Direction 4 in `notebooks/research/future_directions.md`.
+Expand PyTorch reference validation beyond ViT/Whisper to 10 key architectures. Pre-generate fixtures via `scripts/generate_numerical_fixtures.py` (pretrained) and `scripts/generate_random_weight_fixtures.py` (random-weight), compare forward pass at `atol=1e-4`. Gradient validation for architectures with CUDA backward kernels. Random-weight tests in `test/edifice/pretrained/architecture_numerical_test.exs`, shared helper in `test/support/numerical_fixture_helper.ex`. See Direction 4 in `notebooks/research/future_directions.md`.
 
-- [ ] **LSTM numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
-- [ ] **Mamba numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
-- [ ] **GQA numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
-- [ ] **MinGRU numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
-- [ ] **DeltaNet numerical validation** — PyTorch reference fixture + forward + backward gradient comparison
-- [ ] **DETR numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
-- [ ] **DiT numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
+- [x] **LSTM numerical validation** — Random-weight fixture + cross-framework forward pass comparison (`architecture_numerical_test.exs`)
+- [x] **Mamba numerical validation** — Random-weight fixture + cross-framework forward pass comparison (`architecture_numerical_test.exs`)
+- [x] **GQA numerical validation** — Random-weight fixture + cross-framework forward pass comparison (`architecture_numerical_test.exs`)
+- [x] **MinGRU numerical validation** — Random-weight fixture + cross-framework forward pass comparison (`architecture_numerical_test.exs`)
+- [x] **DeltaNet numerical validation** — Random-weight fixture + forward + backward gradient comparison (`architecture_numerical_test.exs`)
+- [x] **DETR numerical validation** — ResNet-50 backbone + post-norm support in DETR, key map (`key_maps/detr.ex`), config registry, fixture generator, forward pass test
+- [x] **DiT numerical validation** — Random-weight fixture + cross-framework forward pass comparison (`architecture_numerical_test.exs`)
 - [x] **ResNet numerical validation** — Key map (`key_maps/resnet.ex`), config registry entry, PyTorch fixture generator, forward pass test
   - [x] **Fix pretrained config test** — `supported_model_types/0` test expects `["convnext", "vit", "whisper"]` but now returns `["convnext", "resnet", "vit", "whisper"]` after adding the ResNet key map. Update assertion in `test/edifice/pretrained/config_test.exs:9`.
-- [ ] **GAT numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
+- [x] **GAT numerical validation** — Random-weight fixture + cross-framework forward pass comparison (`architecture_numerical_test.exs`)
 - [x] **ConvNeXt numerical validation** — PyTorch fixture generator + forward pass test (key map already existed)
 
 #### Applied Task Benchmarks
@@ -411,7 +411,7 @@ Beyond fused CUDA kernels — compiler, runtime, and serving optimizations for f
 - [x] **Streaming generation** — `Generate.generate_stream/3` (callback) + `Generate.token_stream/3` (lazy Stream).
 - [x] **Batched inference server** — `Edifice.Serving.InferenceServer` GenServer with request batching, timeout dispatch, metrics.
 - [x] **Persistent compilation cache** — `Edifice.Compiler` module wrapping `Axon.build/2` with EXLA disk cache (`cache: path` option). XLA autotune cache via `--xla_gpu_per_fusion_autotune_cache_dir` in devenv.nix. Benchmark: `bench/compilation_cache_bench.exs`.
-- [ ] **Nx-level mixed precision auto-casting** — `Edifice.MixedPrecision` module. Automatically cast model layers to bf16 (preserving f32 for normalization and loss). Gradient loss scaling. Benchmark throughput improvement on representative architectures.
+- [x] **Nx-level mixed precision auto-casting** — `Edifice.MixedPrecision` module. Presets (`:bf16`, `:fp16`) auto-cast all layers except normalization (layer_norm, batch_norm, rms_norm, adaptive_norm, group_norm) via `Axon.MixedPrecision`. Dynamic gradient loss scaling (`init_loss_scale/1`, `scale_loss/2`, `unscale_grads/2`) with growth/backoff. Model summary for precision audit. Benchmark: `bench/mixed_precision_bench.exs`.
 - [ ] **Gradient checkpointing / remat** — `Edifice.Training.remat/2`. Selective recomputation of forward activations during backward pass to reduce peak memory. Target: 2-4x memory reduction for training large models.
 #### Using the Serving Layer
 Exercises for the new `Edifice.Serving.*` modules. Validates real-world usage and finds rough edges.

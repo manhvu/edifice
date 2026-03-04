@@ -16,7 +16,7 @@ defmodule Edifice.Pretrained.Config do
   ## Supported model types
 
       Config.supported_model_types()
-      #=> ["convnext", "vit", "whisper"]
+      #=> ["convnext", "detr", "resnet", "vit", "whisper"]
 
   """
 
@@ -26,6 +26,11 @@ defmodule Edifice.Pretrained.Config do
     "vit" => {KeyMaps.ViT, &Edifice.Vision.ViT.build/1, &__MODULE__.map_vit_config/1},
     "convnext" =>
       {KeyMaps.ConvNeXt, &Edifice.Vision.ConvNeXt.build/1, &__MODULE__.map_convnext_config/1},
+    "detr" =>
+      {KeyMaps.DETR, &Edifice.Detection.DETR.build/1, &__MODULE__.map_detr_config/1},
+    "resnet" =>
+      {KeyMaps.ResNet, &Edifice.Convolutional.ResNet.build/1,
+       &__MODULE__.map_resnet_config/1},
     "whisper" => {KeyMaps.Whisper, nil, &__MODULE__.map_whisper_config/1}
   }
 
@@ -89,7 +94,7 @@ defmodule Edifice.Pretrained.Config do
   ## Examples
 
       Config.supported_model_types()
-      #=> ["convnext", "vit", "whisper"]
+      #=> ["convnext", "detr", "resnet", "vit", "whisper"]
 
   """
   @spec supported_model_types() :: [String.t()]
@@ -184,6 +189,57 @@ defmodule Edifice.Pretrained.Config do
           depths: depths,
           dims: hidden_sizes,
           dropout: config["drop_path_rate"] || 0.0
+        ]
+        |> maybe_put(:num_classes, config["num_labels"])
+
+      {:ok, opts}
+    end
+  end
+
+  @doc false
+  @spec map_detr_config(map()) :: {:ok, keyword()} | {:error, String.t()}
+  def map_detr_config(config) do
+    with {:ok, hidden_dim} <- require_field(config, "d_model") do
+      opts = [
+        image_size: config["image_size"] || 800,
+        in_channels: config["num_channels"] || 3,
+        hidden_dim: hidden_dim,
+        num_heads: config["encoder_attention_heads"] || 8,
+        num_encoder_layers: config["encoder_layers"] || 6,
+        num_decoder_layers: config["decoder_layers"] || 6,
+        ffn_dim: config["encoder_ffn_dim"] || 2048,
+        num_queries: config["num_queries"] || 100,
+        num_classes: config["num_labels"] || 91,
+        dropout: config["dropout"] || 0.1,
+        backbone: :resnet50,
+        norm_position: :post
+      ]
+
+      {:ok, opts}
+    end
+  end
+
+  @doc false
+  @spec map_resnet_config(map()) :: {:ok, keyword()} | {:error, String.t()}
+  def map_resnet_config(config) do
+    with {:ok, depths} <- require_field(config, "depths"),
+         {:ok, _hidden_sizes} <- require_field(config, "hidden_sizes") do
+      image_size = config["image_size"] || 224
+      num_channels = config["num_channels"] || 3
+
+      layer_type =
+        case config["layer_type"] do
+          "bottleneck" -> :bottleneck
+          "basic" -> :residual
+          _ -> :residual
+        end
+
+      opts =
+        [
+          input_shape: {nil, image_size, image_size, num_channels},
+          block_sizes: depths,
+          block_type: layer_type,
+          initial_channels: config["embedding_size"] || 64
         ]
         |> maybe_put(:num_classes, config["num_labels"])
 

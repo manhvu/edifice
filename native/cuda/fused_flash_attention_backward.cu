@@ -423,7 +423,7 @@ namespace ffi = xla::ffi;
 
 namespace {  // anonymous namespace — prevents symbol collision between f32/bf16
 
-// Causal hardcoded to 1 to avoid scalar buffer operand segfault in XLA.
+// Causal passed as 1-element tensor to avoid scalar buffer operand segfault in XLA.
 ffi::Error fused_flash_attention_backward_ffi_impl(
     cudaStream_t stream,
     ffi::Buffer<FFI_IO_TYPE> q,
@@ -431,6 +431,7 @@ ffi::Error fused_flash_attention_backward_ffi_impl(
     ffi::Buffer<FFI_IO_TYPE> v,
     ffi::Buffer<FFI_IO_TYPE> o,
     ffi::Buffer<FFI_IO_TYPE> grad_o,
+    ffi::Buffer<FFI_IO_TYPE> causal_packed,
     ffi::ResultBuffer<FFI_IO_TYPE> dq,
     ffi::ResultBuffer<FFI_IO_TYPE> dk,
     ffi::ResultBuffer<FFI_IO_TYPE> dv
@@ -441,7 +442,16 @@ ffi::Error fused_flash_attention_backward_ffi_impl(
     int seq_len  = static_cast<int>(dims[2]);
     int head_dim = static_cast<int>(dims[3]);
 
-    int causal = 1;  // hardcoded causal
+    // Unpack causal from 1-element tensor (same pattern as Titans momentum packing)
+    const io_type* causal_ptr = reinterpret_cast<const io_type*>(causal_packed.untyped_data());
+    io_type causal_raw;
+    cudaMemcpyAsync(&causal_raw, causal_ptr, sizeof(io_type), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+#ifdef USE_BF16
+    int causal = (int)__bfloat162float(causal_raw);
+#else
+    int causal = (int)causal_raw;
+#endif
 
     // Allocate temp buffers for D and lse
     size_t bht = (size_t)batch * num_heads * seq_len;
@@ -510,12 +520,13 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
     HANDLER_SYMBOL(fused_flash_attention_backward), fused_flash_attention_backward_ffi_impl,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // q       [B, H, T, d]
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // k       [B, H, T, d]
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // v       [B, H, T, d]
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // o       [B, H, T, d]
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // grad_o  [B, H, T, d]
-        .Ret<ffi::Buffer<FFI_IO_TYPE>>()   // dQ      [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // q              [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // k              [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // v              [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // o              [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // grad_o         [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // causal_packed  [1]
+        .Ret<ffi::Buffer<FFI_IO_TYPE>>()   // dQ             [B, H, T, d]
         .Ret<ffi::Buffer<FFI_IO_TYPE>>()   // dK      [B, H, T, d]
         .Ret<ffi::Buffer<FFI_IO_TYPE>>()   // dV      [B, H, T, d]
 );

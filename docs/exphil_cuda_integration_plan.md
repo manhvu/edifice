@@ -4,7 +4,7 @@
 
 This document covers two objectives:
 1. **Architecture Gap Analysis** — Edifice architectures ExPhil should adopt but hasn't yet
-2. **Fused Kernel Roadmap** — What CUDA work is needed per architecture to hit 60 FPS
+2. **Fused Kernel Status** — Complete status of all 48 CUDA kernels with EXLA dual-linkage
 
 ### Current State
 
@@ -13,9 +13,8 @@ This document covers two objectives:
 
 ExPhil's 60 FPS target = **<16ms inference** at batch=1, embed=256, seq_len=32, layers=2.
 
-**Currently only 2/35 sequence architectures hit 60 FPS at seq_len=32:**
-- `gated_ssm` — 12.96ms (77.2 FPS)
-- `fnet` — 14.56ms (68.7 FPS)
+**All 48 fused CUDA kernels are complete** — NIF + EXLA custom call (dual-linkage) with
+f32/bf16 support, forward + backward passes, and block scan variants for key architectures.
 
 ---
 
@@ -89,326 +88,191 @@ families are not backbone candidates for the Melee sequence modeling task.
 
 ---
 
-## Part 2: Fused CUDA Kernel Roadmap
+## Part 2: Fused CUDA Kernel Status
 
-### Current Implementation Strategy
+### Implementation Strategy (All Phases Complete)
 
-The plan is two-phase:
-
-**Phase A: NIF Bridge (Current)**
+**Phase A: NIF Bridge — DONE**
 - CUDA kernels compiled as shared libraries (`libedifice_cuda_kernels.so`)
 - Called via Erlang NIF from Elixir
 - Device pointer extraction from EXLA tensors → kernel launch → wrap result back
 - GC-tracked memory management
-- **Status**: Working for MinGRU + MinLSTM (P0 complete)
-- **Limitation**: Requires `cudaDeviceSynchronize` before returning (blocks until done)
 
-**Phase B: EXLA Fork (Next)**
-- Fork `elixir-nx/nx`, add GPU custom calls via XLA FFI
-- Kernels compiled directly into EXLA's NIF .so
+**Phase B: EXLA Custom Call (XLA FFI) — DONE**
+- Forked `elixir-nx/nx`, added GPU custom calls via XLA FFI
+- Kernels compiled directly into EXLA's NIF .so with dual-linkage (`-DEXLA_FFI`)
 - Zero-copy: XLA manages all memory, kernels run on XLA's CUDA stream
-- No synchronization overhead (kernel stays on GPU timeline)
-- Prototype exists on `gpu-custom-calls` branch
+- Generic dispatch in `defn.ex:749-755` handles all custom calls automatically
 
-### Per-Architecture Kernel Analysis
+**Phase C: Stretch Goals — DONE**
+- bf16 kernel variants via `precision.cuh` (`io_type`/`IO_LOAD`/`IO_STORE` macros)
+- Backward pass kernels for all scan architectures
+- Block scan variants for MinGRU, MinLSTM, LSTM, GRU, Linear
 
-#### Already Done
+### Scalar Operand Workarounds
 
-| Architecture | Kernel | Status | Latency Before | Latency After |
-|---|---|---|---|---|
-| `min_gru` | `fused_mingru_scan.cu` | NIF working | 84.75ms | ~12ms (est.) |
-| `min_lstm` | `fused_minlstm_scan.cu` | NIF working | 74.79ms | ~14ms (est.) |
+XLA's FFI mechanism segfaults on 0-dimensional (scalar) buffer operands. Two patterns used:
 
-#### P0: Highest Value — Simple Scans (NIF first, then EXLA)
+1. **Tensor packing** (preferred): Pack scalar into a 1-element `{1}` tensor of the same
+   type as the model tensors. Unpack on CUDA side with `cudaMemcpyAsync` D→H.
+   Used for: Titans momentum, MIRAS momentum, Flash/LASER causal flag.
 
-**3. NativeRecurrence variants** (elu_gru, real_gru, diag_linear)
-- **What**: Three simple GRU-like sequential scans
-- **Recurrence**:
-  - elu_gru: `h = (1-z)*h + z*(1+elu(c))`
-  - real_gru: `h = (1-z)*h + z*c` (identical to MinGRU)
-  - diag_linear: `h = sigmoid(a)*h + b`
-- **Kernel effort**: ~100 lines each, near-copy of MinGRU kernel
-- **Expected speedup**: 5-8x
-- **Why P0**: Trivial to implement given existing MinGRU template
+2. **Combined tensor column** (for values intrinsic to the data): Pack as an extra column
+   in an existing input tensor. Used for: Titans scan (momentum as extra column in combined tensor).
 
-**4. Liquid / LiquidS4**
-- **What**: Liquid Time-Constant network — ODE-based recurrence
-- **Recurrence**: `h_t = h_{t-1} + dt * (-h_{t-1}/tau + f(x_t))` (Euler step)
-- **Inputs**: x_t projections, tau parameters, dt
-- **Kernel effort**: ~150 lines (slightly more complex gate math)
-- **Expected speedup**: 5-6x (89.95ms → ~15ms)
-- **Why P0**: Currently 90ms, simple Euler integration inside scan loop
+### Complete Kernel Inventory (48 production kernels)
 
-#### P1: Medium Value — More Complex Scans
+#### Forward Scan Kernels (19)
 
-**5. Mamba Selective Scan**
-- **What**: Port existing `selective_scan_kernel.cu` from old CustomCall API to XLA FFI
-- **Recurrence**: `h_t = A_bar*h_{t-1} + B*x_t` with input-dependent discretization
-- **Inputs**: x, dt, A, B, C tensors
-- **Kernel effort**: ~200 lines (already written, needs API migration)
-- **Expected speedup**: 3-4x (58ms → ~15ms)
-- **Complication**: State dimension per thread (32 elements), register pressure
+| # | Kernel File | Architecture(s) | Status |
+|---|---|---|---|
+| 1 | `fused_mingru_scan.cu` | MinGRU | Done (NIF + EXLA f32/bf16) |
+| 2 | `fused_minlstm_scan.cu` | MinLSTM | Done (NIF + EXLA f32/bf16) |
+| 3 | `fused_native_rec_scan.cu` | NativeRecurrence (elu_gru, real_gru, diag_linear) | Done (NIF + EXLA f32/bf16) |
+| 4 | `fused_liquid_scan.cu` | Liquid / LiquidS4 | Done (NIF + EXLA f32/bf16) |
+| 5 | `fused_selective_scan.cu` | Mamba, Mamba variants | Done (NIF + EXLA f32/bf16) |
+| 6 | `fused_delta_rule_scan.cu` | DeltaNet, GatedDeltaNet | Done (NIF + EXLA f32/bf16) |
+| 7 | `fused_delta_product_scan.cu` | DeltaProduct | Done (NIF + EXLA f32/bf16) |
+| 8 | `fused_linear_scan.cu` | Linear scan (diag_linear base) | Done (NIF + EXLA f32/bf16) |
+| 9 | `fused_slstm_scan.cu` | sLSTM (xLSTM) | Done (NIF + EXLA f32/bf16) |
+| 10 | `fused_ttt_scan.cu` | TTT | Done (NIF + EXLA f32/bf16) |
+| 11 | `fused_kda_scan.cu` | KDA | Done (NIF + EXLA f32/bf16) |
+| 12 | `fused_rla_scan.cu` | Residual Linear Attention | Done (NIF + EXLA f32/bf16) |
+| 13 | `fused_gru_scan.cu` | GRU | Done (NIF + EXLA f32/bf16) |
+| 14 | `fused_lstm_scan.cu` | LSTM | Done (NIF + EXLA f32/bf16) |
+| 15 | `fused_titans_scan.cu` | Titans | Done (NIF + EXLA f32/bf16) |
+| 16 | `fused_miras_scan.cu` | MIRAS (Moneta, Yaad, Memora) | Done (NIF + EXLA f32/bf16) |
+| 17 | `fused_gsa_scan.cu` | Gated Slot Attention | Done (NIF + EXLA f32/bf16) |
+| 18 | `fused_reservoir_scan.cu` | Reservoir | Done (NIF + EXLA f32/bf16) |
+| 19 | `fused_fox_attention.cu` | Fox (Forgetting Transformer) | Done (NIF + EXLA f32/bf16) |
 
-**6. DeltaNet**
-- **What**: Linear attention with delta rule memory updates
-- **Recurrence**: `S_t = S_{t-1} + beta*(v - S_{t-1}@k) @ k^T`, `o_t = S_t@q_t`
-- **Inputs**: Q, K, V, beta [batch, seq, num_heads, head_dim]
-- **State**: S [batch, num_heads, head_dim, head_dim] — matrix per head
-- **Kernel effort**: ~250 lines
-- **Expected speedup**: 3-5x
-- **Complication**: Matrix state means O(head_dim^2) registers per thread per head.
-  Need to either: (a) use shared memory, or (b) split heads across blocks.
+#### Block-Fused Scan Kernels (5)
 
-**7. Gated DeltaNet**
-- **What**: DeltaNet with gated output
-- **Recurrence**: Same as DeltaNet + output gate
-- **Kernel effort**: ~270 lines (DeltaNet + gate)
-- **Expected speedup**: 3-5x
-- **Complication**: Same as DeltaNet
+| # | Kernel File | Architecture | Status |
+|---|---|---|---|
+| 20 | `fused_mingru_block_scan.cu` | MinGRU (block scan) | Done (NIF + EXLA f32/bf16) |
+| 21 | `fused_minlstm_block_scan.cu` | MinLSTM (block scan) | Done (NIF + EXLA f32/bf16) |
+| 22 | `fused_linear_block_scan.cu` | Linear (block scan) | Done (NIF + EXLA f32/bf16) |
+| 23 | `fused_lstm_block_scan.cu` | LSTM (block scan) | Done (NIF + EXLA f32/bf16) |
+| 24 | `fused_gru_block_scan.cu` | GRU (block scan) | Done (NIF + EXLA f32/bf16) |
 
-**8. DeltaProduct**
-- **What**: Multi-step DeltaNet via products of Householder transformations
-- **Recurrence**: Chain of Householder updates to memory matrix
-- **Kernel effort**: ~300 lines
-- **Expected speedup**: 3-5x
-- **Complication**: Householder products are more compute-intensive
+#### Backward Scan Kernels (16)
 
-#### P2: Lower Value — Complex Cells
+| # | Kernel File | Architecture | Status |
+|---|---|---|---|
+| 25 | `fused_mingru_scan_backward.cu` | MinGRU backward | Done (NIF + EXLA f32/bf16) |
+| 26 | `fused_minlstm_scan_backward.cu` | MinLSTM backward | Done (NIF + EXLA f32/bf16) |
+| 27 | `fused_liquid_scan_backward.cu` | Liquid backward | Done (NIF + EXLA f32/bf16) |
+| 28 | `fused_linear_scan_backward.cu` | Linear scan backward | Done (NIF + EXLA f32/bf16) |
+| 29 | `fused_delta_rule_scan_backward.cu` | DeltaNet backward | Done (NIF + EXLA f32/bf16) |
+| 30 | `fused_selective_scan_backward.cu` | Mamba backward | Done (NIF + EXLA f32/bf16) |
+| 31 | `fused_delta_product_scan_backward.cu` | DeltaProduct backward | Done (NIF + EXLA f32/bf16) |
+| 32 | `fused_slstm_scan_backward.cu` | sLSTM backward | Done (NIF + EXLA f32/bf16) |
+| 33 | `fused_ttt_scan_backward.cu` | TTT backward | Done (NIF + EXLA f32/bf16) |
+| 34 | `fused_kda_scan_backward.cu` | KDA backward | Done (NIF + EXLA f32/bf16) |
+| 35 | `fused_rla_scan_backward.cu` | RLA backward | Done (NIF + EXLA f32/bf16) |
+| 36 | `fused_elu_gru_scan_backward.cu` | NativeRec elu_gru backward | Done (NIF + EXLA f32/bf16) |
+| 37 | `fused_real_gru_scan_backward.cu` | NativeRec real_gru backward | Done (NIF + EXLA f32/bf16) |
+| 38 | `fused_diag_linear_scan_backward.cu` | NativeRec diag_linear backward | Done (NIF + EXLA f32/bf16) |
+| 39 | `fused_gru_scan_backward.cu` | GRU backward | Done (NIF + EXLA f32/bf16) |
+| 40 | `fused_lstm_scan_backward.cu` | LSTM backward | Done (NIF + EXLA f32/bf16) |
 
-**9. LSTM (fused cell)**
-- **What**: Fuse all 4 gates (i, f, o, g) + cell update + output into one kernel per timestep
-- **Recurrence**:
-  ```
-  i,f,o,g = split(W_x@x + W_h@h + b)
-  c = sigmoid(f)*c + sigmoid(i)*tanh(g)
-  h = sigmoid(o)*tanh(c)
-  ```
-- **Kernel effort**: ~350 lines
-- **Expected speedup**: 5-10x (502ms → 50-100ms) — **still won't hit 16ms**
-- **Complication**: Hidden-to-hidden matmul (`W_h@h`) inside the loop is the real
-  bottleneck. Options: (a) use cuBLAS for matmul + fuse the rest, (b) implement
-  matmul in shared memory (feasible for hidden≤256). This is why cuDNN exists.
-- **Alternative**: Investigate XLA cuDNN RNN integration
+#### Attention Kernels (6)
 
-**10. GRU (fused cell)**
-- **What**: Same approach as LSTM, 3 gates instead of 4
-- **Kernel effort**: ~300 lines
-- **Expected speedup**: 5-10x (381ms → 40-80ms) — **still won't hit 16ms**
-- **Complication**: Same hidden-to-hidden matmul problem
+| # | Kernel File | Architecture | Status |
+|---|---|---|---|
+| 41 | `fused_flash_attention.cu` | Flash Attention V2 forward | Done (NIF + EXLA f32/bf16) |
+| 42 | `fused_flash_attention_backward.cu` | Flash Attention V2 backward | Done (NIF + EXLA f32/bf16) |
+| 43 | `fused_laser_attention.cu` | LASER Attention forward | Done (NIF + EXLA f32/bf16) |
+| 44 | `fused_laser_attention_backward.cu` | LASER Attention backward | Done (NIF + EXLA f32/bf16) |
+| 45 | `fused_fox_attention.cu` | Fox Attention forward | Done (NIF + EXLA f32/bf16) |
+| 46 | `fused_fox_attention_backward.cu` | Fox Attention backward | Done (NIF + EXLA f32/bf16) |
 
-**11. sLSTM (xLSTM variant)**
-- **What**: Exponential gating with log-domain stabilization
-- **Recurrence**: i,f,o gates with exp() activation, max-tracking for stability
-- **Kernel effort**: ~300 lines
-- **Expected speedup**: 2-4x
-- **Complication**: Log-domain math (exp, log, max) adds numerical edge cases
+#### Utility Files (2)
 
-**12. TTT (Test-Time Training)**
-- **What**: Inner model weight updates per timestep
-- **Recurrence**:
-  ```
-  pred = LayerNorm(W@k)
-  grad = eta * (pred - v) @ k^T
-  W = W - grad
-  o = W@q
-  ```
-- **Kernel effort**: ~350 lines
-- **Expected speedup**: 2-4x (160ms → 40-80ms)
-- **Complication**: W is [inner_size, inner_size] per batch — massive register/shared
-  memory requirement. May need to tile W into shared memory blocks.
-
-#### P3: Parallel Scan Architectures (EXLA-side only)
-
-These already use parallel/Blelloch scan in Elixir. Fused kernels would help but
-the gain is smaller since the scan structure is already efficient.
-
-**13. Mamba variants** (mamba_cumsum, mamba_hillis_steele, mamba_ssd)
-- Already ~20-25ms. Fused kernel could push to ~12-15ms.
-- Mamba's parallel scan is already well-optimized in EXLA.
-- **Strategy**: Port selective scan kernel to EXLA FFI (same as #5 above).
-
-**14. Longhorn**
-- Uses same parallel scan infra as Mamba
-- Same story: already decent, fused kernel is incremental
-
-**15. S4/S4D/S5/H3**
-- These use FFT-based convolution (not sequential scan)
-- Fusion opportunity is in the FFT → gating → output pipeline
-- Lower priority — the FFT is already handled by cuFFT via XLA
-
-#### Not Candidates for Fused Kernels
-
-| Architecture | Why Not |
-|---|---|
-| `gated_ssm` | Already 12.96ms — fast enough via element-wise ops |
-| `fnet` | Uses FFT, already 14.56ms — handled by cuFFT |
-| `attention`, `gqa`, etc. | Matmul-dominated, FlashAttention is the right optimization |
-| `reservoir` | No learned recurrence (random fixed weights) |
-| `mlp`, `kan` | No temporal processing |
-| `snn` | Spike-based, different optimization domain |
-| `mLSTM` (xLSTM) | Uses D-matrix cumsum formulation, not sequential scan |
-| `huginn` | Iterates over depth, not timesteps — transformer blocks inside |
-| `samba` | Hybrid — fuse the Mamba component (#5), rest is parallel |
-| `jamba`, `zamba` | Hybrid — same story, fuse inner Mamba block |
+| # | File | Purpose |
+|---|---|---|
+| 47 | `test_kernels.cu` | Standalone GPU correctness tests |
+| 48 | `bench_kernels.cu` | Standalone GPU performance benchmarks |
 
 ---
 
-## Part 3: Implementation Phases
+## Part 3: Implementation Phases (Historical)
 
-### Phase A: NIF Bridge Iteration (Current → Near-term)
+All phases are complete. This section preserved for historical reference.
 
-Extend the existing NIF bridge pattern to more architectures.
+### Phase A: NIF Bridge — Complete
+
+Extended the NIF bridge pattern to all architectures.
 
 ```
 edifice/
 ├── native/cuda/
-│   ├── fused_mingru_scan.cu      ✓ Done
-│   ├── fused_minlstm_scan.cu     ✓ Done
-│   ├── fused_native_rec_scan.cu  ← 3 variants (elu_gru, real_gru, diag_linear)
-│   ├── fused_liquid_scan.cu      ← Euler-step ODE scan
-│   ├── fused_deltanet_scan.cu    ← Matrix-state linear attention
-│   ├── test_kernels.cu           ✓ Done
-│   └── bench_kernels.cu          ✓ Done
+│   ├── fused_mingru_scan.cu              ✓ Done
+│   ├── fused_minlstm_scan.cu            ✓ Done
+│   ├── fused_native_rec_scan.cu          ✓ Done (3 variants)
+│   ├── fused_liquid_scan.cu              ✓ Done
+│   ├── fused_selective_scan.cu           ✓ Done (Mamba)
+│   ├── fused_delta_rule_scan.cu          ✓ Done
+│   ├── fused_delta_product_scan.cu       ✓ Done
+│   ├── ... (all 48 kernels)             ✓ Done
+│   ├── test_kernels.cu                   ✓ Done
+│   └── bench_kernels.cu                  ✓ Done
 ├── c_src/
-│   └── edifice_cuda_nif.c        ← Add new NIF functions
+│   └── edifice_cuda_nif.c               ✓ All NIF functions added
 └── lib/edifice/cuda/
-    ├── nif.ex                    ← Add new NIF bindings
-    └── fused_scan.ex             ← Add dispatch for new kernels
+    ├── nif.ex                            ✓ All NIF bindings
+    └── fused_scan.ex                     ✓ All dispatch + 3-tier fallback
 ```
 
-**NIF Bridge development loop:**
-1. Write kernel `.cu` file (copy from MinGRU template)
-2. Add test case in `test_kernels.cu`
-3. Add bench case in `bench_kernels.cu`
-4. Build with `make` in `native/cuda/`
-5. Run standalone GPU tests: `./build/test_kernels`
-6. Add NIF function in `edifice_cuda_nif.c`
-7. Add Elixir binding in `nif.ex`
-8. Add dispatch in `fused_scan.ex`
-9. Wire into architecture module (add fused path)
-10. Run Elixir tests to verify correctness against unfused
+### Phase B: EXLA Fork — Complete
 
-**Order of implementation:**
-1. NativeRecurrence (elu_gru, real_gru, diag_linear) — trivial, proves pattern scales
-2. Liquid — simple ODE scan, high value (90ms → ~15ms)
-3. DeltaNet — first matrix-state kernel, proves the harder pattern
-4. GatedDeltaNet — extend DeltaNet kernel
+All NIF kernels ported to EXLA with dual-linkage compilation.
 
-### Phase B: EXLA Fork (Medium-term)
+- Each `.cu` file compiles in two modes: standalone (NIF) and `-DEXLA_FFI` (EXLA custom call)
+- `precision.cuh` provides `io_type`/`IO_LOAD`/`IO_STORE` macros for f32/bf16
+- Generic dispatch in EXLA `defn.ex` passes all `Nx.Shared.optional` args through to
+  `Value.custom_call_fused` automatically — no per-kernel EXLA changes needed
+- Handler registration: `XLA_FFI_REGISTER_HANDLER` with `"CUDA"` platform + `_f32`/`_bf16` suffix
 
-Once NIF kernels are validated, port them to EXLA for zero-copy integration.
+### Phase C: Stretch Goals — Complete
 
-**Steps:**
-1. Fork `elixir-nx/nx` (or rebase `gpu-custom-calls` branch)
-2. Clean up the prototype `gpu_add.cu` → production-quality patterns
-3. Port each validated NIF kernel to XLA FFI format:
-   - Add `.cu` to `exla/c_src/exla/custom_calls/`
-   - Add `Value.fused_*` function to `exla/lib/exla/mlir/value.ex`
-   - Register via `XLA_FFI_REGISTER_HANDLER` with `"CUDA"` platform
-4. Wire into Nx/Defn custom call mechanism
-5. Update Edifice dispatch to detect EXLA fork and use XLA FFI path
-6. Benchmark: compare NIF path vs EXLA FFI path (expect ~10-20% improvement from
-   eliminating cudaDeviceSynchronize + stream synchronization)
-
-**EXLA FFI kernel template:**
-```cuda
-#include "xla/ffi/api/ffi.h"
-namespace ffi = xla::ffi;
-
-__global__ void my_kernel(...) { /* GPU code */ }
-
-ffi::Error my_impl(cudaStream_t stream, ffi::Buffer<ffi::F32> input,
-                   ffi::ResultBuffer<ffi::F32> output) {
-    // Launch kernel on XLA's stream — no sync needed
-    my_kernel<<<grid, block, 0, stream>>>(...);
-    return ffi::Error::Success();
-}
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(my_handler, my_impl,
-    ffi::Ffi::Bind()
-        .Ctx<ffi::PlatformStream<cudaStream_t>>()
-        .Arg<ffi::Buffer<ffi::F32>>()
-        .Ret<ffi::Buffer<ffi::F32>>());
-
-XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(),
-    "exla_my_kernel_f32", "CUDA", my_handler);
-```
-
-**EXLA fork file layout:**
-```
-nx/exla/c_src/exla/custom_calls/
-├── fused_mingru_scan.cu
-├── fused_minlstm_scan.cu
-├── fused_native_rec_scan.cu
-├── fused_liquid_scan.cu
-├── fused_selective_scan.cu      (Mamba, ported from ExPhil)
-├── fused_deltanet_scan.cu
-├── fused_lstm_cell.cu           (P2, if needed)
-├── flash_attention.cu           (ported from ExPhil NIF)
-└── gpu_add.cu                   (existing prototype)
-```
-
-### Phase C: Stretch Goals
-
-1. **bf16/f16 kernel variants** — 2x memory bandwidth, critical for larger models
-2. **Backward pass kernels** — Training-time fused backward scans
-3. **Multi-layer fusion** — Keep state in registers across layers (avoid global memory round-trip)
-4. **Triton-style autotune** — Try multiple block sizes, pick fastest
-5. **PR to upstream EXLA** — If clean enough, contribute GPU custom call infra back to `elixir-nx/nx`
+1. **bf16 kernel variants** — Done via `precision.cuh` dual compilation
+2. **Backward pass kernels** — Done for all scan architectures (16 backward kernels)
+3. **Block scan variants** — Done for MinGRU, MinLSTM, Linear, LSTM, GRU (5 block kernels)
+4. **Triton-style autotune** — Not pursued (manual tile sizing sufficient)
+5. **PR to upstream EXLA** — Not pursued (fork approach working well)
 
 ---
 
-## Part 4: Priority Summary
+## Part 4: Current Next Steps
 
-### What to do next (ordered)
+From TODO.md — the CUDA kernel work is complete. Focus has shifted to:
 
-1. **Add 22 new backbones to ExPhil** (Tier 1 from Part 1)
-   - Add to `@valid_backbones` in config.ex
-   - Wire up in backbone builder
-   - Run inference benchmark on all new backbones
+### Phase 1 — Trust & Usability (Priority: High)
 
-2. **NIF kernels for NativeRecurrence** (P0, ~1-2 days)
-   - Near-copy of MinGRU kernel
-   - Three variants: elu_gru, real_gru, diag_linear
-   - Validates that the pattern generalizes
+**Numerical Correctness Suite** — Expand PyTorch reference validation beyond ViT/Whisper
+to 10 key architectures (LSTM, Mamba, GQA, MinGRU, DeltaNet, DETR, DiT, ResNet, GAT, ConvNeXt).
 
-3. **NIF kernel for Liquid** (P0, ~2-3 days)
-   - ODE Euler-step scan
-   - High value: 90ms → ~15ms
+**Applied Task Benchmarks** (`bench/tasks/` suite):
+- Sequence classification (length-generalization)
+- Image classification (MNIST/FashionMNIST)
+- Graph classification (community detection)
+- Autoregressive generation (char-level Shakespeare)
+- Copy/recall (synthetic)
 
-4. **NIF kernel for DeltaNet** (P1, ~3-5 days)
-   - First matrix-state kernel
-   - Validates the harder pattern (matrix-vector products in scan)
+### Phase 2 — Production Path (Priority: Medium)
 
-5. **Port Mamba selective scan to NIF** (P1, ~2-3 days)
-   - Already written, just needs NIF wrapper
-   - Brings Mamba from 58ms → ~15ms
+**Inference Serving Layer** (`Edifice.Serving`):
+- Batched inference server, autoregressive generation loop, speculative decoding, streaming
 
-6. **Set up EXLA fork** (P1, ~3-5 days)
-   - Rebase gpu-custom-calls branch
-   - Port MinGRU/MinLSTM kernels
-   - Validate zero-copy path works end-to-end
+**Training Recipes** (`Edifice.Recipes`):
+- Classification, sequence modeling, contrastive, fine-tuning recipes
 
-7. **Port all NIF kernels to EXLA FFI** (P1-P2, ongoing)
-   - Each kernel: ~1 day to port + test
+### Phase 3 — Discovery & Polish (Priority: Low-Medium)
 
-8. **LSTM/GRU fused cells** (P2, ~5-7 days each)
-   - Complex: hidden-to-hidden matmul
-   - May never hit 16ms — consider cuDNN integration instead
-
-### Success Metrics
-
-| Metric | Current | Target | Kernel Needed |
-|---|---|---|---|
-| Architectures at 60 FPS (seq=32) | 2/35 | 10+/35 | P0 + P1 |
-| MinGRU | 84.75ms | <16ms | fused_mingru_scan ✓ |
-| MinLSTM | 74.79ms | <16ms | fused_minlstm_scan ✓ |
-| NativeRecurrence | ~50-80ms (est.) | <16ms | fused_native_rec_scan |
-| Liquid | 89.95ms | <16ms | fused_liquid_scan |
-| DeltaNet | 172ms (est.) | <20ms | fused_deltanet_scan |
-| Mamba | 58.01ms | <16ms | fused_selective_scan |
-| GatedDeltaNet | ~180ms (est.) | <20ms | fused_gated_deltanet_scan |
-| LSTM | 502ms | <50ms | fused_lstm_cell (won't hit 16ms) |
+- Interactive Model Explorer (Livebook Smart Cell or Phoenix LiveView)
+- Architecture Recommender (`Edifice.AutoML.recommend/2`)
 
 ---
 
@@ -416,48 +280,35 @@ nx/exla/c_src/exla/custom_calls/
 
 Quick reference for every ExPhil-relevant architecture and its kernel status.
 
-| Architecture | Scan Type | Kernel Approach | Priority | Status |
-|---|---|---|---|---|
-| min_gru | Sequential, register | fused_mingru_scan.cu | P0 | Done (NIF) |
-| min_lstm | Sequential, register | fused_minlstm_scan.cu | P0 | Done (NIF) |
-| native_recurrence | Sequential, register | fused_native_rec_scan.cu | P0 | Planned |
-| liquid | Sequential, register | fused_liquid_scan.cu | P0 | Planned |
-| mamba | Parallel + selective | fused_selective_scan.cu | P1 | Port from ExPhil |
-| delta_net | Sequential, matrix state | fused_deltanet_scan.cu | P1 | Planned |
-| gated_delta_net | Sequential, matrix state | fused_gated_deltanet_scan.cu | P1 | Planned |
-| delta_product | Sequential, Householder | fused_delta_product_scan.cu | P1 | Planned |
-| lstm | Sequential, matmul | fused_lstm_cell.cu | P2 | Planned |
-| gru | Sequential, matmul | fused_gru_cell.cu | P2 | Planned |
-| slstm | Sequential, log-domain | fused_slstm_scan.cu | P2 | Planned |
-| ttt | Sequential, matrix W | fused_ttt_scan.cu | P2 | Planned |
-| ttt_e2e | Sequential, matrix W | fused_ttt_e2e_scan.cu | P2 | Planned |
-| mamba_ssd | Parallel | Same as mamba | P1 | — |
-| mamba_cumsum | Parallel | Same as mamba | P1 | — |
-| mamba_hillis_steele | Parallel | Same as mamba | P1 | — |
-| mamba3 | Parallel | Same as mamba | P1 | — |
-| longhorn | Parallel | Similar to mamba | P3 | — |
-| gated_ssm | Element-wise | Not needed | — | Already fast |
-| fnet | FFT | Not needed | — | Already fast |
-| attention / gqa | Matmul | FlashAttention | Low | Port from ExPhil |
-| s4 / s4d / s5 / h3 | FFT conv | cuFFT handles it | Low | — |
-| hyena | FFT conv | cuFFT handles it | Low | — |
-| reservoir | None (fixed) | Not needed | — | Already fast |
-| mlp / kan | None | Not needed | — | No temporal |
-| retnet / rwkv | Linear attention | Consider after DeltaNet | P2 | — |
-| gla / gla_v2 | Linear attention | Consider after DeltaNet | P2 | — |
-| hgrn / hgrn_v2 | Gated recurrence | Consider after NativeRec | P2 | — |
-| performer | Linear attention | Kernel approximation | Low | — |
-| titans | Recurrent + attention | Multiple kernels needed | P2 | — |
-| xlstm (sLSTM) | Sequential, log-domain | fused_slstm_scan.cu | P2 | — |
-| xlstm (mLSTM) | D-matrix cumsum | Not a good kernel target | — | Use EXLA |
-| huginn | Iterative depth | Not sequential scan | — | Use EXLA |
-| samba | Hybrid (Mamba inside) | Fuse Mamba component | P1 | — |
-| jamba / zamba | Hybrid (Mamba inside) | Fuse Mamba component | P1 | — |
-| decision_transformer | Attention | FlashAttention | Low | — |
-| snn | Spike-based | Different domain | — | — |
-| hopfield / ntm | Associative memory | Special kernels | P3 | — |
-| coconut | Iterative | Not sequential scan | — | Use EXLA |
-| fox / log_linear / nha | Attention variants | FlashAttention variant | Low | — |
-| laser / moba / mta | Attention variants | FlashAttention variant | Low | — |
-| gsa / rla / tnn | Linear attention | Consider after DeltaNet | P2 | — |
-| miras | Memory variants | Per-variant kernels | P2 | — |
+| Architecture | Scan Type | Kernel File | Status |
+|---|---|---|---|
+| min_gru | Sequential, register | `fused_mingru_scan.cu` | Done (NIF + EXLA f32/bf16 + backward + block) |
+| min_lstm | Sequential, register | `fused_minlstm_scan.cu` | Done (NIF + EXLA f32/bf16 + backward + block) |
+| native_recurrence | Sequential, register | `fused_native_rec_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| liquid | Sequential, register | `fused_liquid_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| mamba | Parallel + selective | `fused_selective_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| delta_net | Sequential, matrix state | `fused_delta_rule_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| gated_delta_net | Sequential, matrix state | `fused_delta_rule_scan.cu` | Done (shared kernel with delta_net) |
+| delta_product | Sequential, Householder | `fused_delta_product_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| lstm | Sequential, matmul | `fused_lstm_scan.cu` | Done (NIF + EXLA f32/bf16 + backward + block) |
+| gru | Sequential, matmul | `fused_gru_scan.cu` | Done (NIF + EXLA f32/bf16 + backward + block) |
+| slstm | Sequential, log-domain | `fused_slstm_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| ttt | Sequential, matrix W | `fused_ttt_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| titans | Recurrent + attention | `fused_titans_scan.cu` | Done (NIF + EXLA f32/bf16, momentum packed) |
+| miras | Memory variants | `fused_miras_scan.cu` | Done (NIF + EXLA f32/bf16, momentum packed) |
+| rla | Linear attention | `fused_rla_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| gsa | Gated slot attention | `fused_gsa_scan.cu` | Done (NIF + EXLA f32/bf16) |
+| kda | KDA | `fused_kda_scan.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| reservoir | Fixed weights | `fused_reservoir_scan.cu` | Done (NIF + EXLA f32/bf16) |
+| attention / gqa | Matmul | `fused_flash_attention.cu` | Done (NIF + EXLA f32/bf16 + backward, causal packed) |
+| laser | exp(V) attention | `fused_laser_attention.cu` | Done (NIF + EXLA f32/bf16 + backward, causal packed) |
+| fox | Forgetting attention | `fused_fox_attention.cu` | Done (NIF + EXLA f32/bf16 + backward) |
+| linear scan | Diagonal linear | `fused_linear_scan.cu` | Done (NIF + EXLA f32/bf16 + backward + block) |
+| gated_ssm | Element-wise | Not needed | Already fast (12.96ms) |
+| fnet | FFT | Not needed | Already fast (14.56ms, cuFFT) |
+| s4 / s4d / s5 / h3 | FFT conv | Not needed | cuFFT handles it |
+| hyena | FFT conv | Not needed | cuFFT handles it |
+| mlp / kan | None | Not needed | No temporal processing |
+| snn | Spike-based | Not needed | Different optimization domain |
+| huginn | Iterative depth | Not needed | Not sequential scan, use EXLA |
+| coconut | Iterative | Not needed | Not sequential scan, use EXLA |

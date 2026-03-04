@@ -3325,9 +3325,6 @@ defmodule Edifice.CUDA.FusedScan do
   Uses tiled loading with online softmax to avoid materializing the full
   [seq, seq] attention matrix. Produces identical results to standard SDPA.
 
-  > **Note:** The EXLA custom call path always uses causal masking.
-  > Non-causal attention uses the NIF or Elixir fallback path.
-
   ## Arguments
 
     * `q` - Query tensor `[batch, heads, seq, head_dim]` (f32)
@@ -3344,8 +3341,7 @@ defmodule Edifice.CUDA.FusedScan do
     causal = if Keyword.get(opts, :causal, false), do: 1, else: 0
 
     cond do
-      # Custom call path only supports causal=1 (hardcoded to avoid scalar operand segfault)
-      causal == 1 and flash_attention_custom_call_available?() ->
+      flash_attention_custom_call_available?() ->
         flash_attention_custom_call(q, k, v, causal)
 
       cuda_available?(q) ->
@@ -3371,10 +3367,10 @@ defmodule Edifice.CUDA.FusedScan do
     {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
     tensor_type = Nx.type(q)
     output = Nx.template({batch, num_heads, seq_len, head_dim}, tensor_type)
-    causal_tensor = Nx.tensor(causal, type: {:s, 32})
+    causal_packed = Nx.tensor([causal], type: tensor_type)
 
     forward_output =
-      Nx.Shared.optional(:fused_flash_attention, [q, k, v, causal_tensor], output, fn q, k, v, _causal ->
+      Nx.Shared.optional(:fused_flash_attention, [q, k, v, causal_packed], output, fn q, k, v, _causal ->
         flash_attention_fallback(q, k, v, causal)
       end)
 
@@ -3454,11 +3450,11 @@ defmodule Edifice.CUDA.FusedScan do
     {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
     ttype = Nx.type(q)
     grad_template = Nx.template({batch, num_heads, seq_len, head_dim}, ttype)
-    causal_tensor = Nx.tensor(causal, type: {:s, 32})
+    causal_packed = Nx.tensor([causal], type: ttype)
 
     Nx.Shared.optional(
       :fused_flash_attention_backward,
-      [q, k, v, forward_out, grad_output, causal_tensor],
+      [q, k, v, forward_out, grad_output, causal_packed],
       {grad_template, grad_template, grad_template},
       fn q, k, v, _fwd, grad, _causal ->
         flash_attention_backward_fallback(q, k, v, causal, grad)
@@ -3521,9 +3517,6 @@ defmodule Edifice.CUDA.FusedScan do
 
   Uses the LWSE trick: subtract `v_max` before exp, add back after log.
 
-  > **Note:** The EXLA custom call path always uses causal masking.
-  > Non-causal attention uses the NIF or Elixir fallback path.
-
   ## Arguments
 
     * `q` - Query tensor `[batch, heads, seq, head_dim]` (f32)
@@ -3543,8 +3536,7 @@ defmodule Edifice.CUDA.FusedScan do
     v_max = Nx.reduce_max(v, axes: [2], keep_axes: true)
 
     cond do
-      # Custom call path only supports causal=1 (hardcoded to avoid scalar operand segfault)
-      causal == 1 and laser_attention_custom_call_available?() ->
+      laser_attention_custom_call_available?() ->
         laser_attention_custom_call(q, k, v, v_max, causal)
 
       cuda_available?(q) ->
@@ -3563,10 +3555,10 @@ defmodule Edifice.CUDA.FusedScan do
     {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
     tensor_type = Nx.type(q)
     output = Nx.template({batch, num_heads, seq_len, head_dim}, tensor_type)
-    causal_tensor = Nx.tensor(causal, type: {:s, 32})
+    causal_packed = Nx.tensor([causal], type: tensor_type)
 
     forward_output =
-      Nx.Shared.optional(:fused_laser_attention, [q, k, v, v_max, causal_tensor], output, fn q, k, v, v_max, _causal ->
+      Nx.Shared.optional(:fused_laser_attention, [q, k, v, v_max, causal_packed], output, fn q, k, v, v_max, _causal ->
         laser_attention_fallback(q, k, v, v_max, causal)
       end)
 
@@ -3653,11 +3645,11 @@ defmodule Edifice.CUDA.FusedScan do
     {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
     ttype = Nx.type(q)
     grad_template = Nx.template({batch, num_heads, seq_len, head_dim}, ttype)
-    causal_tensor = Nx.tensor(causal, type: {:s, 32})
+    causal_packed = Nx.tensor([causal], type: ttype)
 
     Nx.Shared.optional(
       :fused_laser_attention_backward,
-      [q, k, v, v_max, forward_out, grad_output, causal_tensor],
+      [q, k, v, v_max, forward_out, grad_output, causal_packed],
       {grad_template, grad_template, grad_template},
       fn q, k, v, v_max, _fwd, grad, _causal ->
         laser_attention_backward_fallback(q, k, v, v_max, causal, grad)
@@ -5083,10 +5075,15 @@ defmodule Edifice.CUDA.FusedScan do
 
   @doc false
   def custom_call_available? do
-    exla_value = Module.concat([EXLA, MLIR, Value])
+    # Allow disabling fused CUDA custom calls for A/B benchmarking
+    if System.get_env("EDIFICE_DISABLE_FUSED") == "1" do
+      false
+    else
+      exla_value = Module.concat([EXLA, MLIR, Value])
 
-    Code.ensure_loaded?(exla_value) and
-      function_exported?(exla_value, :custom_call_fused, 4)
+      Code.ensure_loaded?(exla_value) and
+        function_exported?(exla_value, :custom_call_fused, 4)
+    end
   rescue
     _ -> false
   end

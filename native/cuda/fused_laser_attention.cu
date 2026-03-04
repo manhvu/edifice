@@ -194,13 +194,14 @@ namespace ffi = xla::ffi;
 
 namespace {  // anonymous namespace — prevents symbol collision between f32/bf16
 
-// Causal hardcoded to 1 to avoid scalar buffer operand segfault in XLA.
+// Causal passed as 1-element tensor to avoid scalar buffer operand segfault in XLA.
 ffi::Error fused_laser_attention_ffi_impl(
     cudaStream_t stream,
     ffi::Buffer<FFI_IO_TYPE> q,
     ffi::Buffer<FFI_IO_TYPE> k,
     ffi::Buffer<FFI_IO_TYPE> v,
     ffi::Buffer<FFI_IO_TYPE> v_max,
+    ffi::Buffer<FFI_IO_TYPE> causal_packed,
     ffi::ResultBuffer<FFI_IO_TYPE> output
 ) {
     auto dims = q.dimensions();
@@ -209,7 +210,16 @@ ffi::Error fused_laser_attention_ffi_impl(
     int seq_len   = static_cast<int>(dims[2]);
     int head_dim  = static_cast<int>(dims[3]);
 
-    int causal = 1;  // hardcoded causal
+    // Unpack causal from 1-element tensor (same pattern as Titans momentum packing)
+    const io_type* causal_ptr = reinterpret_cast<const io_type*>(causal_packed.untyped_data());
+    io_type causal_raw;
+    cudaMemcpyAsync(&causal_raw, causal_ptr, sizeof(io_type), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+#ifdef USE_BF16
+    int causal = (int)__bfloat162float(causal_raw);
+#else
+    int causal = (int)causal_raw;
+#endif
 
     dim3 grid(batch, num_heads);
     dim3 block(TILE_SIZE);
@@ -238,11 +248,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
     HANDLER_SYMBOL(fused_laser_attention), fused_laser_attention_ffi_impl,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // q      [B, H, T, d]
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // k      [B, H, T, d]
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // v      [B, H, T, d]
-        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // v_max  [B, H, 1, d]
-        .Ret<ffi::Buffer<FFI_IO_TYPE>>()   // output [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // q              [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // k              [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // v              [B, H, T, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // v_max          [B, H, 1, d]
+        .Arg<ffi::Buffer<FFI_IO_TYPE>>()   // causal_packed  [1]
+        .Ret<ffi::Buffer<FFI_IO_TYPE>>()   // output         [B, H, T, d]
 );
 
 XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(),

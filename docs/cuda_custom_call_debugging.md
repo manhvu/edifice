@@ -31,31 +31,52 @@ When called outside of `EXLA.jit`/defn, `Nx.Shared.optional` runs the **fallback
 
 **Detection**: If the kernel works via NIF bridge or BinaryBackend fallback but segfaults via EXLA JIT, suspect this issue. Count the operands in the custom call — if any are scalars, that's your culprit.
 
-**Fix Pattern**: Hardcode the scalar value in the C++ FFI handler. Remove it from the operand list.
+**Fix Pattern (preferred): Tensor packing** — Pack the scalar as a 1-element `{1}` tensor
+of the same type as the model tensors. This avoids the 0-d buffer issue while still passing
+the actual value through the XLA graph (no hardcoding, no graph break).
+
+```elixir
+# Elixir side (fused_scan.ex):
+causal_packed = Nx.tensor([causal], type: tensor_type)  # {1} tensor, NOT scalar {}
+# Pass as normal operand in Nx.Shared.optional args
+```
 
 ```cpp
-// BEFORE (segfaults):
+// CUDA side: unpack from 1-element device tensor
 ffi::Error my_kernel_ffi_impl(
     cudaStream_t stream,
     ffi::Buffer<FFI_IO_TYPE> input,
-    ffi::AnyBuffer causal_flag,        // ← scalar causes segfault
+    ffi::Buffer<FFI_IO_TYPE> causal_packed,   // ← 1-element tensor, NOT scalar
     ffi::ResultBuffer<FFI_IO_TYPE> output
 ) {
-    int causal = reinterpret_cast<const int32_t*>(causal_flag.untyped_data())[0];
+    const io_type* causal_ptr = reinterpret_cast<const io_type*>(causal_packed.untyped_data());
+    io_type causal_raw;
+    cudaMemcpyAsync(&causal_raw, causal_ptr, sizeof(io_type), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+#ifdef USE_BF16
+    int causal = (int)__bfloat162float(causal_raw);
+#else
+    int causal = (int)causal_raw;
+#endif
     ...
 }
-// Bind: .Arg<ffi::Buffer<FFI_IO_TYPE>>()  .Arg<ffi::AnyBuffer>()  .Ret<...>()
+// Bind: .Arg<ffi::Buffer<FFI_IO_TYPE>>()  .Arg<ffi::Buffer<FFI_IO_TYPE>>()  .Ret<...>()
+```
 
-// AFTER (works):
+**Alternative fix (legacy): Hardcode** — Remove the scalar from the operand list entirely
+and hardcode the value in C++. Simpler but loses configurability (requires conditional
+dispatch on the Elixir side to fall back for non-hardcoded values).
+
+```cpp
+// Hardcoded approach (no longer recommended):
 ffi::Error my_kernel_ffi_impl(
     cudaStream_t stream,
     ffi::Buffer<FFI_IO_TYPE> input,
     ffi::ResultBuffer<FFI_IO_TYPE> output
 ) {
-    int causal = 1;  // hardcoded
+    int causal = 1;  // hardcoded — only causal=1 goes through custom call
     ...
 }
-// Bind: .Arg<ffi::Buffer<FFI_IO_TYPE>>()  .Ret<...>()
 ```
 
 Then update the Elixir side:
@@ -171,22 +192,24 @@ end
 |-------|-----------|------|--------------|
 | Titans segfault | Scalar `ffi::Buffer<ffi::F32>` momentum operand | Hardcode momentum=0.9 | titans_scan.cu, defn.ex, value.ex |
 | MIRAS segfault | Scalar `ffi::Buffer<ffi::F32>` momentum operand | Hardcode momentum=0.9 | miras_scan.cu, defn.ex, value.ex |
-| Flash attention segfault | Scalar `ffi::AnyBuffer` causal flag | Hardcode causal=1 | flash_attention.cu, flash_attention_backward.cu, defn.ex, value.ex |
-| LASER attention segfault | Scalar `ffi::AnyBuffer` causal flag | Hardcode causal=1 | laser_attention.cu, laser_attention_backward.cu, defn.ex, value.ex |
+| Flash attention segfault | Scalar `ffi::AnyBuffer` causal flag | Hardcode causal=1 (initial fix) | flash_attention.cu, flash_attention_backward.cu, defn.ex, value.ex |
+| LASER attention segfault | Scalar `ffi::AnyBuffer` causal flag | Hardcode causal=1 (initial fix) | laser_attention.cu, laser_attention_backward.cu, defn.ex, value.ex |
 | InfiniAttention segfault | Uses flash_attention internally | Fixed by flash attention fix | (no additional changes) |
 | Reservoir EXLA | `Axon.constant` + `Nx.Shared.optional` tracing | Switch to `Axon.nx` with closure-captured weights | reservoir.ex |
 | RLA attributes error | `ffi::Attr<>()` not supported by EXLA | Convert to `ffi::Arg<>()` / hardcode | rla_scan.cu, defn.ex, value.ex |
 | RLA backward operands | 10 operands > 7 limit | Pack forward_out+grad_output into [2,B,T,H,d] | rla_scan_backward.cu, defn.ex, value.ex |
 | Titans/MIRAS momentum | Scalar `ffi::Buffer<ffi::F32>` momentum | Pack momentum into combined tensor as extra column | titans_scan.cu, miras_scan.cu, fused_scan.ex, defn.ex |
+| Flash/LASER causal hardcoding | `causal=1` hardcoded, non-causal fell back to NIF | Pack causal as 1-element `{1}` tensor (tensor packing pattern) | fused_flash_attention.cu, fused_flash_attention_backward.cu, fused_laser_attention.cu, fused_laser_attention_backward.cu, fused_scan.ex |
 
 ## Current Limitations
 
-### Causal=1 Hardcoding (Flash + LASER Attention)
+No known scalar operand workarounds remain. All scalar parameters (momentum, causal flags)
+are now passed via tensor packing (1-element `{1}` tensors or extra columns in combined tensors).
 
-The Flash Attention and LASER Attention custom call kernels hardcode `causal=1` in the C++ FFI handler. This is because passing scalar integer flags as operands to `stablehlo.custom_call` triggers the scalar buffer operand segfault described above.
+### ~~Causal=1 Hardcoding (Flash + LASER Attention)~~ — RESOLVED
 
-**Impact:** When `causal: false` is requested, the dispatch layer in `fused_scan.ex` routes to the NIF or Elixir fallback path instead of the custom call. This is correct behavior — the NIF and fallback paths handle `causal=0` properly. The only downside is that non-causal attention doesn't benefit from staying inside the XLA graph (minor perf impact from graph break).
+**Previously:** The Flash Attention and LASER Attention custom call kernels hardcoded `causal=1` in the C++ FFI handler, causing non-causal attention to fall back to NIF (graph break).
 
-**When this matters:** Only affects non-causal attention through EXLA JIT. In practice, most transformer models use causal masking for autoregressive generation, so this limitation rarely triggers.
+**Fix (2026-03-04):** Pack causal as a 1-element `{1}` tensor of the model's tensor type (f32 or bf16). On the CUDA side, unpack with `cudaMemcpyAsync` D→H + type conversion. Same pattern as Titans momentum packing. The `causal == 1` guard in `fused_scan.ex` dispatch is removed — both causal and non-causal attention now stay inside the XLA graph.
 
-**Potential fix:** Pack causal as an extra element in one of the input tensors (similar to the momentum packing approach used for Titans/MIRAS). Not implemented because the causal flag is an integer, not a float, and the workaround would require an extra tensor or type casting. The current conditional dispatch is simpler and correct.
+**Files changed:** `fused_flash_attention.cu`, `fused_flash_attention_backward.cu`, `fused_laser_attention.cu`, `fused_laser_attention_backward.cu`, `fused_scan.ex` (6 dispatch functions + 2 docstrings).

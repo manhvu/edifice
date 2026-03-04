@@ -49,6 +49,9 @@ native/cuda/test_*
 # Compiled NIF and CUDA shared libraries
 /priv/
 
+# Compilation and autotune caches
+/.cache
+
 # CUDA/NCCL/NVSHMEM compat symlinks (nix-shell)
 /.cuda-compat
 /.nccl

@@ -365,9 +365,10 @@ Expand PyTorch reference validation beyond ViT/Whisper to 10 key architectures. 
 - [ ] **DeltaNet numerical validation** — PyTorch reference fixture + forward + backward gradient comparison
 - [ ] **DETR numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
 - [ ] **DiT numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
-- [ ] **ResNet numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
+- [x] **ResNet numerical validation** — Key map (`key_maps/resnet.ex`), config registry entry, PyTorch fixture generator, forward pass test
+  - [x] **Fix pretrained config test** — `supported_model_types/0` test expects `["convnext", "vit", "whisper"]` but now returns `["convnext", "resnet", "vit", "whisper"]` after adding the ResNet key map. Update assertion in `test/edifice/pretrained/config_test.exs:9`.
 - [ ] **GAT numerical validation** — PyTorch reference fixture + cross-framework forward pass comparison
-- [ ] **ConvNeXt numerical validation** — PyTorch reference fixture (key map already exists) + forward pass comparison
+- [x] **ConvNeXt numerical validation** — PyTorch fixture generator + forward pass test (key map already existed)
 
 #### Applied Task Benchmarks
 `bench/tasks/` suite evaluating architectures on small standardized tasks. Answers "which architecture for my problem?" See Direction 1 in `notebooks/research/future_directions.md`.
@@ -399,12 +400,16 @@ Expand PyTorch reference validation beyond ViT/Whisper to 10 key architectures. 
 #### Non-Kernel Performance Optimizations
 Beyond fused CUDA kernels — compiler, runtime, and serving optimizations for faster inference and training.
 
-- [ ] **XLA compiler flags sweep** — `bench/xla_flags_sweep.exs`. Benchmark impact of key XLA_FLAGS (`xla_gpu_enable_latency_hiding_scheduler`, `xla_gpu_graph_level`, `xla_gpu_all_reduce_combine_threshold_bytes`, etc.) on representative architectures. Document effective flags in `guides/xla_optimization.md`.
-- [ ] **Graph-level profiling** — `Edifice.Profile` module. Wrapper around EXLA compilation that logs: compilation time, number of XLA ops, fusion boundaries, peak memory estimate. Export XLA HLO graph for visualization with `xla_hlo_graph_viewer`.
-- [ ] **Persistent compilation cache** — Disk-based XLA compilation cache via `XLA_FLAGS=--xla_gpu_enable_xla_runtime_executable_caching` or EXLA-level serialization. Benchmark cold-start vs warm-start times. Target: first-call latency from seconds to milliseconds.
+- [x] **XLA compiler flags sweep** — `bench/xla_flags_sweep.exs`. Benchmarks representative architectures under current XLA_FLAGS. Documents recommended flag combinations for latency vs throughput.
+- [x] **Graph-level profiling** — `Edifice.Profile` module. Compilation + inference profiling with EXLA telemetry hooks, memory stats, multi-architecture comparison tables.
+- [x] **Autoregressive generation loop** — `Edifice.Serving.Generate` (build_lm/1, generate/3, generate_simple/3) + `Edifice.Serving.Sampling` (temperature, top-k, top-p, Gumbel-max). `bench/generation_bench.exs` for position-aware vs recompute benchmarking.
+- [ ] **Run XLA flags sweep on GPU** — Execute `bench/xla_flags_sweep.exs` with EXLA on RTX 5090. Test flag combos: `--xla_gpu_enable_latency_hiding_scheduler`, `--xla_gpu_graph_level={1,2,3}`, `--xla_gpu_enable_command_buffer`. Document winning combo in `guides/xla_optimization.md`.
+- [ ] **Run generation benchmark on GPU** — Execute `bench/generation_bench.exs` with EXLA compiler. Measure position-aware vs recompute speedup. Test with decoder_only architecture at realistic dims (256 embed, 4 layers, 8 heads).
+- [ ] **Profile all architecture families** — Use `Edifice.Profile.compare/1` with EXLA to profile compilation + inference across all families (recurrent, SSM, attention, transformer). Identify compilation bottlenecks and regression candidates.
+- [ ] **Wire speculative decoding into generation loop** — Integrate `Edifice.Meta.SpeculativeDecoding` with `Edifice.Serving.Generate`. Draft-verify cycle with adaptive K heads. Benchmark tokens/sec vs vanilla autoregressive.
+- [x] **Persistent compilation cache** — `Edifice.Compiler` module wrapping `Axon.build/2` with EXLA disk cache (`cache: path` option). XLA autotune cache via `--xla_gpu_per_fusion_autotune_cache_dir` in devenv.nix. Benchmark: `bench/compilation_cache_bench.exs`.
 - [ ] **Nx-level mixed precision auto-casting** — `Edifice.MixedPrecision` module. Automatically cast model layers to bf16 (preserving f32 for normalization and loss). Gradient loss scaling. Benchmark throughput improvement on representative architectures.
 - [ ] **Gradient checkpointing / remat** — `Edifice.Training.remat/2`. Selective recomputation of forward activations during backward pass to reduce peak memory. Target: 2-4x memory reduction for training large models.
-- [ ] **Speculative decoding end-to-end** — Wire `Edifice.Inference.Medusa` + `Edifice.Meta.SpeculativeDecoding` into the generation loop. Draft-verify cycle with adaptive K heads. Benchmark tokens/sec vs vanilla autoregressive.
 - [ ] **Nx.Serving batched inference** — `Edifice.Serving.InferenceServer` GenServer with configurable batch accumulation, timeout-based dispatch, architecture-aware padding. Benchmark throughput at various batch sizes and concurrency levels.
 
 ### Phase 3 — Discovery & Polish (Priority: Low-Medium)

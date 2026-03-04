@@ -6,7 +6,7 @@ defmodule Edifice.Pretrained.ConfigTest do
   describe "supported_model_types/0" do
     test "returns sorted list of supported types" do
       types = Config.supported_model_types()
-      assert types == ["convnext", "vit", "whisper"]
+      assert types == ["convnext", "resnet", "vit", "whisper"]
     end
   end
 

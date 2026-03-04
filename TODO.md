@@ -468,8 +468,12 @@ Livebook Smart Cell (`kino_edifice`) for browsing, configuring, and comparing Ed
 #### Applied Task Benchmarks
 `bench/tasks/` suite — train small models on real tasks to answer "which architecture for my problem?"
 
-- [ ] **Sequence classification** — Synthetic length-generalization dataset. LSTM, Mamba, GQA, MinGRU, RetNet. Accuracy + latency.
-- [ ] **Image classification** — MNIST/FashionMNIST subset. MLP, ResNet, ViT, ConvNeXt, EfficientViT. Accuracy + params.
-- [ ] **Graph classification** — Synthetic community detection. GCN, GAT, GIN, EGNN, GPS. Accuracy.
-- [ ] **Autoregressive generation** — Char-level Shakespeare. Decoder-only, Mamba, RWKV, Hyena. Perplexity + throughput.
-- [ ] **Copy/recall task** — Synthetic. LSTM, Mamba, Titans, SSM variants. Accuracy vs sequence length.
+All 6 bench files written (`task_helpers.exs`, `sequence_classification.exs`, `copy_recall.exs`, `image_classification.exs`, `autoregressive.exs`, `graph_classification.exs`). **Blocked on `value_and_grad` + EXLA.Backend incompatibility** (same issue affects existing `training_throughput.exs`). See `docs/bench_tasks_fixup_plan.md` for full details.
+
+- [ ] **Fix `value_and_grad` EXLA/Expr incompatibility** — Apply `Nx.backend_copy` in `TaskHelpers.train/4` to convert captured EXLA tensors to BinaryBackend before tracing. Alternatively, restructure train step to use `Nx.Defn.jit` with explicit args (like `sanity_check.exs`). This unblocks ALL task benches AND fixes existing `training_throughput.exs`.
+- [x] **Sequence classification** — Cumsum sign prediction. LSTM, Mamba, GQA, MinGRU, RetNet. `bench/tasks/sequence_classification.exs`.
+- [x] **Image classification** — Quadrant brightness. ResNet, ViT, ConvNeXt, MLPMixer, EfficientViT. `bench/tasks/image_classification.exs`.
+- [x] **Graph classification** — Edge density. GCN, GAT, GIN, GINv2. `bench/tasks/graph_classification.exs`.
+- [x] **Autoregressive generation** — Repeating grammar next-token. DecoderOnly, Mamba, RWKV, MinGRU. `bench/tasks/autoregressive.exs`.
+- [x] **Copy/recall task** — Template memory. LSTM, Mamba, MinGRU, RetNet, DeltaNet, Titans. `bench/tasks/copy_recall.exs`.
+- [ ] **Verify all tasks** — Run each bench, confirm learning (accuracy > random baseline), fix any arch-specific failures.

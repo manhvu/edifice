@@ -406,11 +406,22 @@ Beyond fused CUDA kernels — compiler, runtime, and serving optimizations for f
 - [ ] **Run XLA flags sweep on GPU** — Execute `bench/xla_flags_sweep.exs` with EXLA on RTX 5090. Test flag combos: `--xla_gpu_enable_latency_hiding_scheduler`, `--xla_gpu_graph_level={1,2,3}`, `--xla_gpu_enable_command_buffer`. Document winning combo in `guides/xla_optimization.md`.
 - [ ] **Run generation benchmark on GPU** — Execute `bench/generation_bench.exs` with EXLA compiler. Measure position-aware vs recompute speedup. Test with decoder_only architecture at realistic dims (256 embed, 4 layers, 8 heads).
 - [ ] **Profile all architecture families** — Use `Edifice.Profile.compare/1` with EXLA to profile compilation + inference across all families (recurrent, SSM, attention, transformer). Identify compilation bottlenecks and regression candidates.
-- [ ] **Wire speculative decoding into generation loop** — Integrate `Edifice.Meta.SpeculativeDecoding` with `Edifice.Serving.Generate`. Draft-verify cycle with adaptive K heads. Benchmark tokens/sec vs vanilla autoregressive.
+- [x] **Wire speculative decoding into generation loop** — `Edifice.Serving.Speculative`. Draft-verify pipeline with accept_reject prefix matching.
+- [x] **Medusa generation pipeline** — `Edifice.Serving.MedusaGenerate`. Tree candidates → verify → accept best path.
+- [x] **Streaming generation** — `Generate.generate_stream/3` (callback) + `Generate.token_stream/3` (lazy Stream).
+- [x] **Batched inference server** — `Edifice.Serving.InferenceServer` GenServer with request batching, timeout dispatch, metrics.
 - [x] **Persistent compilation cache** — `Edifice.Compiler` module wrapping `Axon.build/2` with EXLA disk cache (`cache: path` option). XLA autotune cache via `--xla_gpu_per_fusion_autotune_cache_dir` in devenv.nix. Benchmark: `bench/compilation_cache_bench.exs`.
 - [ ] **Nx-level mixed precision auto-casting** — `Edifice.MixedPrecision` module. Automatically cast model layers to bf16 (preserving f32 for normalization and loss). Gradient loss scaling. Benchmark throughput improvement on representative architectures.
 - [ ] **Gradient checkpointing / remat** — `Edifice.Training.remat/2`. Selective recomputation of forward activations during backward pass to reduce peak memory. Target: 2-4x memory reduction for training large models.
-- [ ] **Nx.Serving batched inference** — `Edifice.Serving.InferenceServer` GenServer with configurable batch accumulation, timeout-based dispatch, architecture-aware padding. Benchmark throughput at various batch sizes and concurrency levels.
+#### Using the Serving Layer
+Exercises for the new `Edifice.Serving.*` modules. Validates real-world usage and finds rough edges.
+
+- [ ] **End-to-end generation demo** — Livebook or script that builds a decoder_only LM, loads/initializes params, and generates text with `Generate.generate/3`. Show streaming output with `generate_stream/3`. Target: working demo in `notebooks/small_language_model.livemd`.
+- [ ] **Speculative decoding benchmark** — Compare `Speculative.generate` (draft=min_gru, verifier=decoder_only) vs vanilla `Generate.generate` on same model. Measure tokens/sec, acceptance rate via `:on_accept` callback. Target: `bench/speculative_bench.exs`.
+- [ ] **Medusa benchmark** — Compare `MedusaGenerate.generate` vs vanilla on decoder_only + 4 Medusa heads. Measure tokens/sec, accepted tokens per round. Target: `bench/medusa_bench.exs`.
+- [ ] **InferenceServer load test** — Spawn N concurrent clients calling `InferenceServer.predict/2`. Measure throughput at batch_size={1,4,8,16}, concurrency={1,4,8}. Target: `bench/inference_server_bench.exs`.
+- [ ] **Streaming WebSocket demo** — Phoenix or Bandit endpoint that streams tokens from `token_stream/3` over WebSocket. Proof-of-concept for real-time serving.
+- [ ] **KV cache attention integration** — Wire `KVCache.build_cached_attention/1` into decoder_only's GQA layer for true O(n) per-step decoding. Benchmark vs current pad-and-recompute approach.
 
 ### Phase 3 — Discovery & Polish (Priority: Low-Medium)
 

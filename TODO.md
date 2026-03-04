@@ -397,10 +397,11 @@ Expand PyTorch reference validation beyond ViT/Whisper to 10 key architectures. 
 #### Training Recipes
 `Edifice.Recipes` — pre-built training configurations with sensible defaults. See Direction 6 in `notebooks/research/future_directions.md`.
 
-- [ ] **Classification recipe** — `Edifice.Recipes.classify/3`. Cross-entropy, Adam, cosine LR, early stopping.
-- [ ] **Sequence modeling recipe** — `Edifice.Recipes.language_model/3`. Causal LM loss, gradient clipping, warmup.
-- [ ] **Contrastive recipe** — `Edifice.Recipes.contrastive/3`. InfoNCE, projection head, EMA target.
-- [ ] **Fine-tuning recipe** — `Edifice.Recipes.fine_tune/4`. Freeze base + train head. LoRA/DoRA support via existing meta modules.
+- [x] **Classification recipe** — `Edifice.Recipes.classify/2`. Cross-entropy, AdamW, cosine LR, early stopping, accuracy metric, label smoothing, mixed precision.
+- [x] **Sequence modeling recipe** — `Edifice.Recipes.language_model/2`. Cross-entropy, AdamW + gradient clipping via `Polaris.Updates.compose`, warmup+cosine schedule, perplexity metric.
+- [x] **Contrastive recipe** — `Edifice.Recipes.contrastive/2`. InfoNCE/NT-Xent loss (public `infonce_loss/2`), AdamW, cosine LR.
+- [x] **Fine-tuning recipe** — `Edifice.Recipes.fine_tune/3`. Freeze base via `ModelState.freeze/unfreeze`, train head by pattern match. Strategies: `:head_only`, `:lora`, `:full`. Warmup+cosine schedule.
+- [x] **Recipe introspection** — `Edifice.Recipes.describe/2`. Returns config summary map for any recipe.
 
 #### Non-Kernel Performance Optimizations
 Beyond fused CUDA kernels — compiler, runtime, and serving optimizations for faster inference and training.

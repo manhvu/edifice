@@ -61,6 +61,7 @@ defmodule Edifice.Recurrent.DeepResLSTM do
     - `:norm` - `:layer_norm` or `:rms_norm` (default: `:layer_norm`)
     - `:seq_len` - Concrete sequence length for JIT (default: 60)
     - `:window_size` - Alias for `:seq_len` (default: 60)
+    - `:fused_block` - Use fused multi-layer block scan kernel for inference (default: false)
 
   ## Returns
 
@@ -75,6 +76,7 @@ defmodule Edifice.Recurrent.DeepResLSTM do
           | {:norm, :layer_norm | :rms_norm}
           | {:seq_len, pos_integer()}
           | {:window_size, pos_integer()}
+          | {:fused_block, boolean()}
 
   @spec build([build_opt()]) :: Axon.t()
   def build(opts \\ []) do
@@ -85,17 +87,22 @@ defmodule Edifice.Recurrent.DeepResLSTM do
     norm = Keyword.get(opts, :norm, @default_norm)
     window_size = Keyword.get(opts, :window_size, @default_window_size)
     seq_len = Keyword.get(opts, :seq_len, window_size)
+    fused_block = Keyword.get(opts, :fused_block, false)
 
     input = Axon.input("state_sequence", shape: {nil, seq_len, embed_dim})
 
     # Dense encoder: project to hidden_size
     x = Axon.dense(input, hidden_size, name: "encoder")
 
-    # Stack N residual LSTM blocks
+    # Stack N residual LSTM blocks (or fused block scan)
     x =
-      Enum.reduce(1..num_layers, x, fn layer_idx, acc ->
-        res_lstm_block(acc, hidden_size, dropout, norm, layer_idx)
-      end)
+      if fused_block do
+        build_fused_block(x, hidden_size, num_layers)
+      else
+        Enum.reduce(1..num_layers, x, fn layer_idx, acc ->
+          res_lstm_block(acc, hidden_size, dropout, norm, layer_idx)
+        end)
+      end
 
     # Final layer norm
     x = apply_norm(x, norm, hidden_size, "final_norm")
@@ -108,6 +115,23 @@ defmodule Edifice.Recurrent.DeepResLSTM do
         Nx.slice_along_axis(tensor, seq - 1, 1, axis: 1) |> Nx.squeeze(axes: [1])
       end,
       name: "last_timestep"
+    )
+  end
+
+  # Fused block path: passthrough on CPU, actual dispatch via pack_block_weights + fused_block_inference
+  defp build_fused_block(input, hidden_size, num_layers) do
+    # Create per-layer parameter nodes (disconnected — ensures Axon tracks param shapes)
+    for layer_idx <- 1..num_layers do
+      normed = Axon.layer_norm(input, name: "block_#{layer_idx}_prenorm", epsilon: 1.0e-6)
+      _wx = Axon.dense(normed, 4 * hidden_size, name: "lstm_#{layer_idx}_input_proj")
+    end
+
+    # Passthrough layer — fused execution uses pack_block_weights/3 + fused_block_inference/5
+    Axon.layer(
+      fn input_tensor, _opts -> input_tensor end,
+      [input],
+      name: "lstm_fused_block",
+      op_name: :lstm_fused_block
     )
   end
 

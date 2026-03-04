@@ -104,6 +104,7 @@ defmodule Edifice.Recurrent do
           {:cell_type, cell_type()}
           | {:dropout, float()}
           | {:embed_dim, pos_integer()}
+          | {:fused_block, boolean()}
           | {:hidden_size, pos_integer()}
           | {:num_layers, pos_integer()}
           | {:return_sequences, boolean()}
@@ -120,6 +121,7 @@ defmodule Edifice.Recurrent do
     dropout = Keyword.get(opts, :dropout, @default_dropout)
     return_sequences = Keyword.get(opts, :return_sequences, false)
     truncate_bptt = Keyword.get(opts, :truncate_bptt, @default_truncate_bptt)
+    fused_block = Keyword.get(opts, :fused_block, false)
     # Use concrete seq_len for efficient JIT compilation (same fix as attention)
     window_size = Keyword.get(opts, :window_size, 60)
     seq_len = Keyword.get(opts, :seq_len, window_size)
@@ -134,7 +136,8 @@ defmodule Edifice.Recurrent do
       cell_type: cell_type,
       dropout: dropout,
       return_sequences: return_sequences,
-      truncate_bptt: truncate_bptt
+      truncate_bptt: truncate_bptt,
+      fused_block: fused_block
     )
   end
 
@@ -164,49 +167,58 @@ defmodule Edifice.Recurrent do
     truncate_bptt = Keyword.get(opts, :truncate_bptt, @default_truncate_bptt)
     input_layer_norm = Keyword.get(opts, :input_layer_norm, true)
     use_layer_norm = Keyword.get(opts, :use_layer_norm, true)
+    fused_block = Keyword.get(opts, :fused_block, false)
 
-    # Normalize input embeddings for stable gradient flow
-    # This prevents large activation magnitudes from compounding through time
-    normalized_input =
-      if input_layer_norm do
-        Axon.layer_norm(input, name: "input_ln", epsilon: 1.0e-6)
-      else
-        input
-      end
-
-    # Apply gradient truncation if configured
-    # This stops gradients from flowing back beyond the last N timesteps
-    processed_input =
-      if truncate_bptt do
-        apply_gradient_truncation(normalized_input, truncate_bptt)
-      else
-        normalized_input
-      end
-
-    # Build stacked recurrent layers
-    output =
-      Enum.reduce(1..num_layers, processed_input, fn layer_idx, acc ->
-        is_last_layer = layer_idx == num_layers
-
-        # Only return sequences for intermediate layers, or if explicitly requested
-        layer_return_seq = not is_last_layer or return_sequences
-
-        layer =
-          build_recurrent_layer(acc, hidden_size, cell_type,
-            name: "#{cell_type}_#{layer_idx}",
-            return_sequences: layer_return_seq,
-            use_layer_norm: use_layer_norm
-          )
-
-        # Add dropout between layers (not after last)
-        if dropout > 0 and not is_last_layer do
-          Axon.dropout(layer, rate: dropout, name: "recurrent_dropout_#{layer_idx}")
+    if fused_block and cell_type in [:lstm, :gru] do
+      # Fused block path: kernel handles prenorm internally via packed weights.
+      # Input is passed raw (no input_ln) — the block kernel applies layer 1's
+      # prenorm using the packed input_ln weights.
+      build_fused_block(input, hidden_size, num_layers, cell_type, return_sequences)
+    else
+      # Standard sequential path
+      # Normalize input embeddings for stable gradient flow
+      # This prevents large activation magnitudes from compounding through time
+      normalized_input =
+        if input_layer_norm do
+          Axon.layer_norm(input, name: "input_ln", epsilon: 1.0e-6)
         else
-          layer
+          input
         end
-      end)
 
-    output
+      # Apply gradient truncation if configured
+      # This stops gradients from flowing back beyond the last N timesteps
+      processed_input =
+        if truncate_bptt do
+          apply_gradient_truncation(normalized_input, truncate_bptt)
+        else
+          normalized_input
+        end
+
+      # Build stacked recurrent layers
+      output =
+        Enum.reduce(1..num_layers, processed_input, fn layer_idx, acc ->
+          is_last_layer = layer_idx == num_layers
+
+          # Only return sequences for intermediate layers, or if explicitly requested
+          layer_return_seq = not is_last_layer or return_sequences
+
+          layer =
+            build_recurrent_layer(acc, hidden_size, cell_type,
+              name: "#{cell_type}_#{layer_idx}",
+              return_sequences: layer_return_seq,
+              use_layer_norm: use_layer_norm
+            )
+
+          # Add dropout between layers (not after last)
+          if dropout > 0 and not is_last_layer do
+            Axon.dropout(layer, rate: dropout, name: "recurrent_dropout_#{layer_idx}")
+          else
+            layer
+          end
+        end)
+
+      output
+    end
   end
 
   @doc """
@@ -362,6 +374,165 @@ defmodule Edifice.Recurrent do
   defp nif_available? do
     Code.ensure_loaded?(Edifice.CUDA.NIF) and
       function_exported?(Edifice.CUDA.NIF, :fused_lstm_scan, 7)
+  end
+
+  # ============================================================================
+  # Fused Block Scan (multi-layer kernel dispatch)
+  # ============================================================================
+
+  # Fused block path: passthrough on CPU, actual dispatch via pack_block_weights + fused_block_inference
+  defp build_fused_block(input, hidden_size, num_layers, cell_type, return_sequences) do
+    num_gates = case cell_type do
+      :lstm -> 4
+      :gru -> 3
+    end
+
+    # Create per-layer parameter nodes (disconnected — ensures Axon tracks param shapes)
+    for layer_idx <- 1..num_layers do
+      name = "#{cell_type}_#{layer_idx}"
+      normed = Axon.layer_norm(input, name: "#{name}_prenorm", epsilon: 1.0e-6)
+      _wx = Axon.dense(normed, num_gates * hidden_size, name: "#{name}_input_proj")
+    end
+
+    # Passthrough layer — fused execution uses pack_block_weights/4 + fused_*_block_inference
+    block_output = Axon.layer(
+      fn input_tensor, _opts -> input_tensor end,
+      [input],
+      name: "#{cell_type}_fused_block",
+      op_name: :"#{cell_type}_fused_block"
+    )
+
+    # Final post-norm (corresponds to the last layer's layer norm in sequential path)
+    normed = Axon.layer_norm(block_output, name: "#{cell_type}_#{num_layers}_ln", epsilon: 1.0e-6)
+
+    if return_sequences do
+      normed
+    else
+      Axon.nx(normed, fn tensor ->
+        seq = Nx.axis_size(tensor, 1)
+        Nx.slice_along_axis(tensor, seq - 1, 1, axis: 1) |> Nx.squeeze(axes: [1])
+      end, name: "#{cell_type}_fused_last")
+    end
+  end
+
+  @doc """
+  Pack trained Axon parameters into the flat weight buffer expected by the
+  fused LSTM block scan kernel.
+
+  Maps the sequential path's parameter names to the block kernel layout:
+  layer 1's prenorm uses `input_ln`, layer k>1 uses `{cell_type}_{k-1}_ln`.
+
+  ## Arguments
+    * `params` - trained parameter map from `Axon.build` + training
+    * `num_layers` - number of stacked recurrent layers
+    * `hidden_size` - hidden dimension
+    * `cell_type` - `:lstm` or `:gru`
+
+  ## Returns
+    Flat `{:f, 32}` tensor. LSTM stride: `8*H*H + 6*H` per layer.
+    GRU stride: `6*H*H + 5*H` per layer.
+  """
+  @spec pack_block_weights(map(), pos_integer(), pos_integer(), cell_type()) :: Nx.Tensor.t()
+  def pack_block_weights(params, num_layers, _hidden_size, :lstm) do
+    layers =
+      for layer_idx <- 1..num_layers do
+        w_x = params["lstm_#{layer_idx}_input_proj"]["kernel"]
+        b_x = params["lstm_#{layer_idx}_input_proj"]["bias"]
+        r_w = params["lstm_#{layer_idx}_fused_scan"]["lstm_#{layer_idx}_recurrent_kernel"]
+
+        # Prenorm mapping: block layer 1 uses input_ln, layer k>1 uses lstm_{k-1}_ln
+        {gamma, beta} =
+          if layer_idx == 1 do
+            {params["input_ln"]["gamma"], params["input_ln"]["beta"]}
+          else
+            ln = "lstm_#{layer_idx - 1}_ln"
+            {params[ln]["gamma"], params[ln]["beta"]}
+          end
+
+        Nx.concatenate([
+          Nx.flatten(w_x),
+          Nx.flatten(b_x),
+          Nx.flatten(r_w),
+          Nx.flatten(gamma),
+          Nx.flatten(beta)
+        ])
+      end
+
+    Nx.concatenate(layers)
+  end
+
+  def pack_block_weights(params, num_layers, _hidden_size, :gru) do
+    layers =
+      for layer_idx <- 1..num_layers do
+        w_x = params["gru_#{layer_idx}_input_proj"]["kernel"]
+        b_x = params["gru_#{layer_idx}_input_proj"]["bias"]
+        r_w = params["gru_#{layer_idx}_fused_scan"]["gru_#{layer_idx}_recurrent_kernel"]
+
+        # Prenorm mapping: block layer 1 uses input_ln, layer k>1 uses gru_{k-1}_ln
+        {gamma, beta} =
+          if layer_idx == 1 do
+            {params["input_ln"]["gamma"], params["input_ln"]["beta"]}
+          else
+            ln = "gru_#{layer_idx - 1}_ln"
+            {params[ln]["gamma"], params[ln]["beta"]}
+          end
+
+        Nx.concatenate([
+          Nx.flatten(w_x),
+          Nx.flatten(b_x),
+          Nx.flatten(r_w),
+          Nx.flatten(gamma),
+          Nx.flatten(beta)
+        ])
+      end
+
+    Nx.concatenate(layers)
+  end
+
+  @doc """
+  Run fused LSTM block inference with pre-packed weights.
+
+  Runs all LSTM layers in a single kernel call.
+
+  ## Arguments
+    * `input` - [B, T, H] input tensor
+    * `packed_weights` - output of `pack_block_weights/4` with `:lstm`
+    * `num_layers` - number of layers
+    * `h0` - optional [B, num_layers, H] initial hidden states (default: zeros)
+    * `c0` - optional [B, num_layers, H] initial cell states (default: zeros)
+
+  ## Returns
+    `[B, T, H]` — output after all LSTM layers
+  """
+  def fused_lstm_block_inference(input, packed_weights, num_layers, h0 \\ nil, c0 \\ nil) do
+    {batch, _seq_len, hidden} = Nx.shape(input)
+
+    h0 = h0 || Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_layers, hidden})
+    c0 = c0 || Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_layers, hidden})
+
+    Edifice.CUDA.FusedScan.lstm_block(input, packed_weights, h0, c0, num_layers)
+  end
+
+  @doc """
+  Run fused GRU block inference with pre-packed weights.
+
+  Runs all GRU layers in a single kernel call.
+
+  ## Arguments
+    * `input` - [B, T, H] input tensor
+    * `packed_weights` - output of `pack_block_weights/4` with `:gru`
+    * `num_layers` - number of layers
+    * `h0` - optional [B, num_layers, H] initial hidden states (default: zeros)
+
+  ## Returns
+    `[B, T, H]` — output after all GRU layers
+  """
+  def fused_gru_block_inference(input, packed_weights, num_layers, h0 \\ nil) do
+    {batch, _seq_len, hidden} = Nx.shape(input)
+
+    h0 = h0 || Nx.broadcast(Nx.tensor(0.0, type: {:f, 32}), {batch, num_layers, hidden})
+
+    Edifice.CUDA.FusedScan.gru_block(input, packed_weights, h0, num_layers)
   end
 
   # ============================================================================

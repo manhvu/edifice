@@ -52,7 +52,7 @@ defmodule Edifice.CUDA.FusedScan do
   @doc false
   def mingru(gates, candidates) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:mingru, gates) ->
         mingru_custom_call(gates, candidates)
 
       cuda_available?(gates) ->
@@ -66,7 +66,7 @@ defmodule Edifice.CUDA.FusedScan do
   @doc false
   def minlstm(forget_gates, input_gates, candidates) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:minlstm, forget_gates) ->
         minlstm_custom_call(forget_gates, input_gates, candidates)
 
       cuda_available?(forget_gates) ->
@@ -80,7 +80,7 @@ defmodule Edifice.CUDA.FusedScan do
   @doc false
   def elu_gru(gates, candidates) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:elu_gru, gates) ->
         elu_gru_custom_call(gates, candidates)
 
       cuda_available?(gates) ->
@@ -94,7 +94,7 @@ defmodule Edifice.CUDA.FusedScan do
   @doc false
   def real_gru(gates, candidates) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:real_gru, gates) ->
         real_gru_custom_call(gates, candidates)
 
       cuda_available?(gates) ->
@@ -108,7 +108,7 @@ defmodule Edifice.CUDA.FusedScan do
   @doc false
   def diag_linear(a_vals, b_vals) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:diag_linear, a_vals) ->
         diag_linear_custom_call(a_vals, b_vals)
 
       cuda_available?(a_vals) ->
@@ -122,7 +122,7 @@ defmodule Edifice.CUDA.FusedScan do
   @doc false
   def liquid(tau, activation) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:liquid, tau) ->
         liquid_custom_call(tau, activation)
 
       cuda_available?(tau) ->
@@ -145,7 +145,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def linear_scan(a_vals, b_vals) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:linear_scan, a_vals) ->
         linear_scan_custom_call(a_vals, b_vals)
 
       cuda_available?(a_vals) ->
@@ -166,7 +166,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def delta_net_scan(q, k, v, beta) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:delta_net_scan, q) ->
         delta_net_custom_call(q, k, v, beta)
 
       cuda_available?(q) ->
@@ -187,7 +187,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def gated_delta_net_scan(q, k, v, beta, alpha) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:gated_delta_net_scan, q) ->
         gated_delta_net_custom_call(q, k, v, beta, alpha)
 
       cuda_available?(q) ->
@@ -211,7 +211,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def delta_product_scan(q, k, v, beta) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:delta_product_scan, q) ->
         delta_product_custom_call(q, k, v, beta)
 
       cuda_available?(q) ->
@@ -231,7 +231,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def slstm_scan(wx, recurrent_weight) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:slstm_scan, wx) ->
         slstm_custom_call(wx, recurrent_weight)
 
       cuda_available?(wx) ->
@@ -252,7 +252,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def lstm_scan(wx, recurrent_weight) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:lstm_scan, wx) ->
         lstm_custom_call(wx, recurrent_weight)
 
       cuda_available?(wx) ->
@@ -274,7 +274,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def gru_scan(wx, recurrent_weight) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:gru_scan, wx) ->
         gru_custom_call(wx, recurrent_weight)
 
       cuda_available?(wx) ->
@@ -297,7 +297,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def ttt_scan(q, k, v, eta, w0, ln_gamma, ln_beta) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:ttt_scan, q) ->
         ttt_custom_call(q, k, v, eta, w0, ln_gamma, ln_beta)
 
       cuda_available?(q) ->
@@ -320,7 +320,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def selective_scan(x, dt, a, b, c) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:selective_scan, x) ->
         selective_scan_custom_call(x, dt, a, b, c)
 
       cuda_available?(x) ->
@@ -345,7 +345,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def kda_scan(q, k, v, alpha, beta) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:kda_scan, q) ->
         kda_custom_call(q, k, v, alpha, beta)
 
       cuda_available?(q) ->
@@ -378,7 +378,7 @@ defmodule Edifice.CUDA.FusedScan do
     clip_threshold = Keyword.get(opts, :clip_threshold, 1.0)
 
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:rla_scan, q) ->
         rla_custom_call(q, k, v, alpha, beta, gamma, variant, clip_threshold)
 
       cuda_available?(q) ->
@@ -3341,7 +3341,7 @@ defmodule Edifice.CUDA.FusedScan do
     causal = if Keyword.get(opts, :causal, false), do: 1, else: 0
 
     cond do
-      flash_attention_custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:flash_attention, q) ->
         flash_attention_custom_call(q, k, v, causal)
 
       cuda_available?(q) ->
@@ -3536,7 +3536,7 @@ defmodule Edifice.CUDA.FusedScan do
     v_max = Nx.reduce_max(v, axes: [2], keep_axes: true)
 
     cond do
-      laser_attention_custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:laser_attention, q) ->
         laser_attention_custom_call(q, k, v, v_max, causal)
 
       cuda_available?(q) ->
@@ -3547,9 +3547,7 @@ defmodule Edifice.CUDA.FusedScan do
     end
   end
 
-  defp laser_attention_custom_call_available? do
-    custom_call_available?()
-  end
+  # laser_attention_custom_call_available? removed — dispatch uses AutoTune.use_fused?/2
 
   defp laser_attention_custom_call(q, k, v, v_max, causal) do
     {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
@@ -3733,7 +3731,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def fox_attention(q, k, v, cs) do
     cond do
-      fox_attention_custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:fox_attention, q) ->
         fox_attention_custom_call(q, k, v, cs)
 
       cuda_available?(q) ->
@@ -3744,9 +3742,7 @@ defmodule Edifice.CUDA.FusedScan do
     end
   end
 
-  defp fox_attention_custom_call_available? do
-    custom_call_available?()
-  end
+  # fox_attention_custom_call_available? removed — dispatch uses AutoTune.use_fused?/2
 
   defp fox_attention_custom_call(q, k, v, cs) do
     {batch, num_heads, seq_len, head_dim} = Nx.shape(q)
@@ -3940,7 +3936,7 @@ defmodule Edifice.CUDA.FusedScan do
     leak_rate = Keyword.get(opts, :leak_rate, 1.0)
 
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:reservoir_scan, wx) ->
         reservoir_custom_call(wx, w_res, leak_rate)
 
       cuda_available?(wx) ->
@@ -4034,7 +4030,7 @@ defmodule Edifice.CUDA.FusedScan do
     momentum = Keyword.get(opts, :momentum, 0.9)
 
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:titans_scan, combined) ->
         titans_custom_call(combined, memory_size, momentum)
 
       cuda_available?(combined) ->
@@ -4141,7 +4137,7 @@ defmodule Edifice.CUDA.FusedScan do
     momentum = Keyword.get(opts, :momentum, 0.9)
 
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:miras_scan, combined) ->
         miras_custom_call(combined, memory_size, momentum)
 
       cuda_available?(combined) ->
@@ -4258,7 +4254,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def gsa_scan(q, k_slot, v, alpha) do
     cond do
-      custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:gsa_scan, q) ->
         gsa_custom_call(q, k_slot, v, alpha)
 
       cuda_available?(q) ->
@@ -4389,7 +4385,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def mingru_block(input, weights, h0, num_layers) do
     cond do
-      block_custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:mingru_block, input) ->
         mingru_block_custom_call(input, weights, h0, num_layers)
 
       cuda_available?(input) ->
@@ -4512,7 +4508,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def minlstm_block(input, weights, h0, num_layers) do
     cond do
-      block_custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:minlstm_block, input) ->
         minlstm_block_custom_call(input, weights, h0, num_layers)
 
       cuda_available?(input) ->
@@ -4647,7 +4643,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def linear_block(input, weights, h0, num_layers) do
     cond do
-      linear_block_custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:linear_block, input) ->
         linear_block_custom_call(input, weights, h0, num_layers)
 
       cuda_available?(input) ->
@@ -4769,7 +4765,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def lstm_block(input, weights, h0, c0, num_layers) do
     cond do
-      lstm_block_custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:lstm_block, input) ->
         lstm_block_custom_call(input, weights, h0, c0, num_layers)
 
       cuda_available?(input) ->
@@ -4911,7 +4907,7 @@ defmodule Edifice.CUDA.FusedScan do
   """
   def gru_block(input, weights, h0, num_layers) do
     cond do
-      gru_block_custom_call_available?() ->
+      Edifice.CUDA.AutoTune.use_fused?(:gru_block, input) ->
         gru_block_custom_call(input, weights, h0, num_layers)
 
       cuda_available?(input) ->
@@ -5076,7 +5072,9 @@ defmodule Edifice.CUDA.FusedScan do
   @doc false
   def custom_call_available? do
     # Allow disabling fused CUDA custom calls for A/B benchmarking
-    if System.get_env("EDIFICE_DISABLE_FUSED") == "1" do
+    # Process dict flag used by AutoTune to force fallback during benchmarking
+    if System.get_env("EDIFICE_DISABLE_FUSED") == "1" or
+         Process.get(:__edifice_force_fallback__, false) do
       false
     else
       exla_value = Module.concat([EXLA, MLIR, Value])

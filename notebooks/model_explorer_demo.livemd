@@ -1,0 +1,75 @@
+# Edifice Model Explorer Demo
+
+```elixir
+Mix.install([
+  {:edifice, path: Path.join(__DIR__, "..")},
+  {:kino, "~> 0.14"}
+])
+```
+
+## Setup
+
+Register the Smart Cell so it appears in the "Smart" cell menu.
+
+```elixir
+Edifice.SmartCell.ModelExplorer.register()
+```
+
+## Usage
+
+Click the **+ Smart** button below and select **Edifice Model Explorer**.
+
+The cell provides:
+
+* **Family dropdown** — pick from transformer, recurrent, ssm, vision, etc.
+* **Architecture dropdown** — filtered to the selected family
+* **Option inputs** — common options (embed_dim, num_layers, etc.) plus family-specific ones
+* **Variable name** — the output variable for the built model
+
+After evaluating, a summary line shows layer count, parameter count, and memory estimate.
+
+<!-- livebook:{"break_markdown":true} -->
+
+### Manual equivalent
+
+If you prefer code, the Smart Cell generates calls like:
+
+```elixir
+model = Edifice.build(:mamba, embed_dim: 128, num_layers: 4, state_size: 16)
+```
+
+```elixir
+{encoder, decoder} = Edifice.build(:vae, embed_dim: 256, latent_size: 64)
+```
+
+### Inspect a model
+
+```elixir
+model = Edifice.build(:decoder_only, embed_dim: 128, num_heads: 4, num_layers: 2, seq_len: 32)
+IO.puts(Edifice.Display.as_table(model))
+```
+
+### Compare architectures
+
+```elixir
+for arch <- [:mamba, :decoder_only, :lstm, :min_gru, :mlp] do
+  m = Edifice.build(arch, embed_dim: 128, num_layers: 2, num_heads: 4, seq_len: 32)
+  layers = Axon.reduce_nodes(m, 0, fn _, acc -> acc + 1 end)
+  table = Edifice.Display.as_table(m)
+  lines = String.split(table, "\n")
+  IO.puts("#{arch}: #{layers} layers — #{Enum.at(lines, -2) |> String.trim()}, #{Enum.at(lines, -1) |> String.trim()}")
+end
+
+:ok
+```
+
+### Wire into a training recipe
+
+```elixir
+model = Edifice.build(:mlp, embed_dim: 64, hidden_sizes: [128, 64])
+IO.inspect(Edifice.Recipes.describe(:classify, num_classes: 10), label: "Recipe config")
+
+# To train:
+# loop = Edifice.Recipes.classify(model, num_classes: 10, log: false)
+# state = Axon.Loop.run(loop, train_data, %{}, epochs: 5)
+```

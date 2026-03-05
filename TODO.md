@@ -453,6 +453,12 @@ Livebook Smart Cell for browsing, configuring, and comparing Edifice architectur
 - [x] **JS/CSS assets** — Inline `asset "main.js"` + `asset "main.css"`. Vanilla JS, no npm deps. Livebook-compatible CSS custom properties.
 - [x] **Demo Livebook** — `notebooks/model_explorer_demo.livemd`. Setup, Smart Cell usage, manual equivalent, model inspection, architecture comparison, recipe wiring.
 
+**Manual Testing** (Livebook):
+- [ ] **Smoke-test Smart Cell in Livebook** — Open `notebooks/model_explorer_demo.livemd`, register cell, insert "Edifice Model Explorer". Verify: family dropdown populates (26 families), architecture dropdown filters by family, option inputs render and update, generated code evaluates to valid `%Axon{}`, summary bar shows layers/params/memory after eval.
+- [ ] **Test persistence** — Save notebook with a configured Smart Cell, close and reopen. Verify family, architecture, options, and variable name all restore correctly.
+- [ ] **Test tuple architectures** — Select generative → vae, evaluate. Verify generated code uses `{encoder, decoder} = Edifice.build(:vae, ...)` destructuring and the cell evaluates without error.
+- [ ] **Test all families** — Click through each of the 26 families, verify architecture dropdown updates and at least one architecture per family builds successfully.
+
 **Comparison & Exploration** (future):
 - [ ] **Side-by-side comparison cell** — Second Smart Cell (`"Edifice Compare"`) that takes 2-4 architecture selections, builds each, and displays a comparison table: param count, layer depth, estimated memory (`Training.estimate_memory`), forward pass latency (optional, with EXLA).
 - [ ] **Recipe integration** — Dropdown to select a training recipe (`classify`, `language_model`, etc.) and auto-generate `Edifice.Recipes.describe/2` output alongside the model config. Shows recommended hyperparameters for the selected arch+recipe combo.

@@ -106,9 +106,10 @@ defmodule SequenceClassification do
       base = Edifice.build(arch, opts)
       model = base |> Axon.dense(@num_classes)
 
-      {init_fn, predict_fn} = Axon.build(model)
+      {init_fn, predict_fn} = Axon.build(model, mode: :inference)
       template = %{"state_sequence" => Nx.template({@batch, @seq_len, @embed}, :f32)}
       model_state = init_fn.(template, Axon.ModelState.empty())
+      model_state = TaskHelpers.materialize_rnn_states(model_state, @batch, @hidden)
 
       {train_us, {final_state, loss_history}} =
         :timer.tc(fn ->

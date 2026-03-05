@@ -204,7 +204,7 @@ defmodule GraphClassification do
     try do
       model = build_fn.()
 
-      {init_fn, predict_fn} = Axon.build(model)
+      {init_fn, predict_fn} = Axon.build(model, mode: :inference)
 
       template_base = %{
         "nodes" => Nx.template({@batch, @num_nodes, @node_dim}, :f32),

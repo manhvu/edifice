@@ -29,6 +29,16 @@ defmodule Edifice.Recipes do
   - `language_model/2` — Autoregressive language modeling (causal LM loss, gradient clipping, warmup)
   - `contrastive/2` — Contrastive learning (InfoNCE loss, cosine schedule)
   - `fine_tune/3` — Transfer learning (freeze base + train head, optional LoRA)
+  - `regress/2` — Regression (MSE/Huber loss, AdamW, cosine LR)
+
+  ## Common Options
+
+  All recipes accept these shared options:
+
+  - `:validation_data` — When provided, attaches `Axon.Loop.validate` to log
+    validation metrics each epoch. Accepts any enumerable of `{input, target}` batches.
+  - `:checkpoint_path` — Directory path for saving checkpoints. When set, saves the
+    best model (by validation loss if validation_data is provided, otherwise every epoch).
   """
 
   @doc """
@@ -44,6 +54,8 @@ defmodule Edifice.Recipes do
   - `:patience` — Early stopping patience in epochs (default: 5)
   - `:label_smoothing` — Label smoothing factor, 0.0 to disable (default: 0.0)
   - `:precision` — Mixed precision preset, nil to disable (default: nil)
+  - `:validation_data` — Validation data for per-epoch evaluation (default: nil)
+  - `:checkpoint_path` — Directory for saving checkpoints (default: nil)
   - `:log` — Log training progress (default: true)
 
   ## Returns
@@ -70,6 +82,8 @@ defmodule Edifice.Recipes do
     patience = Keyword.get(opts, :patience, 5)
     label_smoothing = Keyword.get(opts, :label_smoothing, 0.0)
     precision = Keyword.get(opts, :precision, nil)
+    validation_data = Keyword.get(opts, :validation_data, nil)
+    checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
@@ -94,7 +108,9 @@ defmodule Edifice.Recipes do
       model
       |> Axon.Loop.trainer(loss, optimizer)
       |> Axon.Loop.metric(:accuracy)
+      |> maybe_validate(model, validation_data)
       |> Axon.Loop.early_stop("loss", patience: patience, mode: :min)
+      |> maybe_checkpoint(checkpoint_path, validation_data)
 
     maybe_log(loop, log)
   end
@@ -111,6 +127,8 @@ defmodule Edifice.Recipes do
   - `:decay_steps` — Total decay steps for cosine schedule (default: 10000)
   - `:max_grad_norm` — Global gradient norm clip (default: 1.0)
   - `:precision` — Mixed precision preset (default: nil)
+  - `:validation_data` — Validation data for per-epoch evaluation (default: nil)
+  - `:checkpoint_path` — Directory for saving checkpoints (default: nil)
   - `:log` — Log training progress (default: true)
 
   ## Returns
@@ -135,6 +153,8 @@ defmodule Edifice.Recipes do
     decay_steps = Keyword.get(opts, :decay_steps, 10_000)
     max_grad_norm = Keyword.get(opts, :max_grad_norm, 1.0)
     precision = Keyword.get(opts, :precision, nil)
+    validation_data = Keyword.get(opts, :validation_data, nil)
+    checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
@@ -153,6 +173,8 @@ defmodule Edifice.Recipes do
       model
       |> Axon.Loop.trainer(loss, optimizer)
       |> Axon.Loop.metric(&perplexity_metric/2, "perplexity")
+      |> maybe_validate(model, validation_data)
+      |> maybe_checkpoint(checkpoint_path, validation_data)
 
     maybe_log(loop, log)
   end
@@ -170,6 +192,8 @@ defmodule Edifice.Recipes do
   - `:weight_decay` — AdamW weight decay (default: 1.0e-4)
   - `:decay_steps` — Cosine decay steps (default: 10000)
   - `:precision` — Mixed precision preset (default: nil)
+  - `:validation_data` — Validation data for per-epoch evaluation (default: nil)
+  - `:checkpoint_path` — Directory for saving checkpoints (default: nil)
   - `:log` — Log training progress (default: true)
 
   ## Data Format
@@ -198,6 +222,8 @@ defmodule Edifice.Recipes do
     weight_decay = Keyword.get(opts, :weight_decay, 1.0e-4)
     decay_steps = Keyword.get(opts, :decay_steps, 10_000)
     precision = Keyword.get(opts, :precision, nil)
+    validation_data = Keyword.get(opts, :validation_data, nil)
+    checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
@@ -205,8 +231,6 @@ defmodule Edifice.Recipes do
     schedule = Polaris.Schedules.cosine_decay(lr, decay_steps: decay_steps)
     optimizer = Polaris.Optimizers.adamw(learning_rate: schedule, decay: weight_decay)
 
-    # InfoNCE loss: model output is embeddings, loss computes
-    # similarity between first/second half of batch (positive pairs)
     loss_fn = fn _y_true, y_pred ->
       infonce_loss(y_pred, temperature)
     end
@@ -214,6 +238,8 @@ defmodule Edifice.Recipes do
     loop =
       model
       |> Axon.Loop.trainer(loss_fn, optimizer)
+      |> maybe_validate(model, validation_data)
+      |> maybe_checkpoint(checkpoint_path, validation_data)
 
     maybe_log(loop, log)
   end
@@ -269,6 +295,8 @@ defmodule Edifice.Recipes do
     steps_per_epoch = Keyword.get(opts, :steps_per_epoch, 1000)
     warmup_ratio = Keyword.get(opts, :warmup_ratio, 0.1)
     precision = Keyword.get(opts, :precision, nil)
+    validation_data = Keyword.get(opts, :validation_data, nil)
+    checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
@@ -284,7 +312,89 @@ defmodule Edifice.Recipes do
       model
       |> Axon.Loop.trainer(:categorical_cross_entropy, optimizer)
       |> Axon.Loop.metric(:accuracy)
+      |> maybe_validate(model, validation_data)
       |> attach_init_state(init_state)
+      |> maybe_checkpoint(checkpoint_path, validation_data)
+
+    maybe_log(loop, log)
+  end
+
+  @doc """
+  Build a regression training loop.
+
+  ## Options
+
+  - `:learning_rate` — Initial learning rate (default: 1.0e-3)
+  - `:weight_decay` — AdamW weight decay (default: 1.0e-2)
+  - `:epochs` — Number of training epochs for LR schedule (default: 10)
+  - `:steps_per_epoch` — Steps per epoch for LR schedule (default: 1000)
+  - `:patience` — Early stopping patience in epochs (default: 5)
+  - `:loss` — Loss function, `:mse` or `:huber` (default: `:mse`)
+  - `:precision` — Mixed precision preset (default: nil)
+  - `:validation_data` — Validation data for per-epoch evaluation (default: nil)
+  - `:checkpoint_path` — Directory for saving checkpoints (default: nil)
+  - `:log` — Log training progress (default: true)
+
+  ## Returns
+
+  Configured `Axon.Loop` with:
+  - Loss: MSE or Huber
+  - Optimizer: AdamW with cosine decay
+  - Metrics: loss + MAE
+  - Early stopping on loss
+
+  ## Example
+
+      model = Edifice.build(:mlp, embed_dim: 64, hidden_sizes: [128, 64])
+      loop = Edifice.Recipes.regress(model, loss: :huber)
+      state = Axon.Loop.run(loop, train_data, %{}, epochs: 10)
+  """
+  @spec regress(Axon.t(), keyword()) :: Axon.Loop.t()
+  def regress(model, opts \\ []) do
+    lr = Keyword.get(opts, :learning_rate, 1.0e-3)
+    weight_decay = Keyword.get(opts, :weight_decay, 1.0e-2)
+    epochs = Keyword.get(opts, :epochs, 10)
+    steps_per_epoch = Keyword.get(opts, :steps_per_epoch, 1000)
+    patience = Keyword.get(opts, :patience, 5)
+    loss_type = Keyword.get(opts, :loss, :mse)
+    precision = Keyword.get(opts, :precision, nil)
+    validation_data = Keyword.get(opts, :validation_data, nil)
+    checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
+    log = Keyword.get(opts, :log, true)
+
+    model = maybe_apply_precision(model, precision)
+
+    decay_steps = epochs * steps_per_epoch
+    schedule = Polaris.Schedules.cosine_decay(lr, decay_steps: decay_steps)
+    optimizer = Polaris.Optimizers.adamw(learning_rate: schedule, decay: weight_decay)
+
+    loss =
+      case loss_type do
+        :huber ->
+          fn y_true, y_pred ->
+            diff = Nx.subtract(y_true, y_pred)
+            abs_diff = Nx.abs(diff)
+            # Smooth L1 / Huber with delta=1.0
+            Nx.mean(
+              Nx.select(
+                Nx.less(abs_diff, 1.0),
+                Nx.multiply(0.5, Nx.pow(diff, 2)),
+                Nx.subtract(abs_diff, 0.5)
+              )
+            )
+          end
+
+        _mse ->
+          :mean_squared_error
+      end
+
+    loop =
+      model
+      |> Axon.Loop.trainer(loss, optimizer)
+      |> Axon.Loop.metric(&mean_absolute_error/2, "mae")
+      |> maybe_validate(model, validation_data)
+      |> Axon.Loop.early_stop("loss", patience: patience, mode: :min)
+      |> maybe_checkpoint(checkpoint_path, validation_data)
 
     maybe_log(loop, log)
   end
@@ -344,6 +454,19 @@ defmodule Edifice.Recipes do
           learning_rate: Keyword.get(opts, :learning_rate, 2.0e-5),
           warmup_ratio: Keyword.get(opts, :warmup_ratio, 0.1)
         }
+
+      :regress ->
+        loss_type = Keyword.get(opts, :loss, :mse)
+
+        %{
+          loss: if(loss_type == :huber, do: :huber, else: :mean_squared_error),
+          optimizer: :adamw,
+          schedule: :cosine_decay,
+          metrics: [:loss, :mae],
+          callbacks: [:early_stop],
+          weight_decay: Keyword.get(opts, :weight_decay, 1.0e-2),
+          learning_rate: Keyword.get(opts, :learning_rate, 1.0e-3)
+        }
     end
   end
 
@@ -388,6 +511,18 @@ defmodule Edifice.Recipes do
 
   defp maybe_apply_precision(model, nil), do: model
   defp maybe_apply_precision(model, preset), do: Edifice.MixedPrecision.apply(model, preset)
+
+  defp maybe_validate(loop, _model, nil), do: loop
+
+  defp maybe_validate(loop, model, validation_data) do
+    Axon.Loop.validate(loop, model, validation_data)
+  end
+
+  defp maybe_checkpoint(loop, nil, _validation_data), do: loop
+
+  defp maybe_checkpoint(loop, path, _validation_data) do
+    Axon.Loop.checkpoint(loop, event: :epoch_completed, file_pattern: path)
+  end
 
   defp maybe_log(loop, true) do
     Axon.Loop.log(loop, :epoch_completed, fn state ->
@@ -471,5 +606,9 @@ defmodule Edifice.Recipes do
   defp perplexity_metric(y_true, y_pred) do
     loss = Axon.Losses.categorical_cross_entropy(y_true, y_pred, reduction: :mean)
     Nx.exp(loss)
+  end
+
+  defp mean_absolute_error(y_true, y_pred) do
+    Nx.mean(Nx.abs(Nx.subtract(y_true, y_pred)))
   end
 end

@@ -175,7 +175,7 @@ defmodule ImageClassification do
   defp quadrant_offsets(2), do: {@half, 0}
   defp quadrant_offsets(3), do: {@half, @half}
 
-  defp select_images(nchw, nhwc, :nchw), do: {nchw, nchw}
+  defp select_images(nchw, _nhwc, :nchw), do: {nchw, nchw}
   defp select_images(_nchw, nhwc, :nhwc), do: {nhwc, nhwc}
 
   defp run_arch(arch, category, opts, input_name, layout, train_batches, eval_batches) do
@@ -183,7 +183,7 @@ defmodule ImageClassification do
       # Vision models already include classification head via num_classes
       model = Edifice.build(arch, opts)
 
-      {init_fn, predict_fn} = Axon.build(model)
+      {init_fn, predict_fn} = Axon.build(model, mode: :inference)
 
       template_shape =
         case layout do

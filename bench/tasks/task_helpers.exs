@@ -26,11 +26,19 @@ defmodule TaskHelpers do
     Enum.reduce(1..epochs, {init_model_state, []}, fn _epoch, {ms, losses} ->
       {ms, epoch_loss} =
         Enum.reduce(batches, {ms, 0.0}, fn {input, target}, {ms, acc} ->
+          # backend_copy all captured tensors to BinaryBackend so they can
+          # be inlined as constants during defn tracing (avoids EXLA.Backend
+          # vs Nx.Defn.Expr incompatibility in value_and_grad closures)
+          input_bc = backend_copy_map(input)
+          target_bc = Nx.backend_copy(target, Nx.BinaryBackend)
+          state_bc = backend_copy_state(ms.state)
+          ms_bc = %{ms | state: state_bc}
+
           {loss, grads} =
             Nx.Defn.value_and_grad(ms.data, fn params ->
-              state = %{ms | data: params}
-              output = predict_fn.(state, input)
-              loss_fn.(output, target)
+              state = %{ms_bc | data: params}
+              output = predict_fn.(state, input_bc)
+              loss_fn.(output, target_bc)
             end)
 
           new_data = sgd_step(ms.data, grads, lr)
@@ -219,6 +227,35 @@ defmodule TaskHelpers do
   defp collect_tensors(%Nx.Tensor{} = t), do: [t]
   defp collect_tensors(%{} = map), do: Enum.flat_map(map, fn {_, v} -> collect_tensors(v) end)
   defp collect_tensors(_), do: []
+
+  @doc """
+  Replace RNN hidden state init descriptors (["key"]) with zero tensors.
+  Must be called before training any architecture that uses Axon.rnn_state
+  (LSTM, GRU, etc.) to avoid Nx.Random.split failures inside value_and_grad.
+  """
+  def materialize_rnn_states(model_state, batch_size, hidden_size) do
+    new_state =
+      Map.new(model_state.state, fn
+        {k, ["key"]} ->
+          {k, Nx.broadcast(Nx.tensor(0.0), {batch_size, hidden_size})}
+
+        {k, v} ->
+          {k, v}
+      end)
+
+    %{model_state | state: new_state}
+  end
+
+  defp backend_copy_map(map) do
+    Map.new(map, fn {k, v} -> {k, Nx.backend_copy(v, Nx.BinaryBackend)} end)
+  end
+
+  defp backend_copy_state(state) do
+    Map.new(state, fn
+      {k, %Nx.Tensor{} = t} -> {k, Nx.backend_copy(t, Nx.BinaryBackend)}
+      {k, v} -> {k, v}
+    end)
+  end
 
   defp sgd_step(params, grads, lr) do
     Map.new(params, fn {key, value} ->

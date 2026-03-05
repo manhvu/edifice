@@ -370,7 +370,7 @@ Expand PyTorch reference validation beyond ViT/Whisper to 10 key architectures. 
 - [x] **GAT numerical validation** — Random-weight fixture + cross-framework forward pass comparison (`architecture_numerical_test.exs`)
 - [x] **ConvNeXt numerical validation** — PyTorch fixture generator + forward pass test (key map already existed)
 - [x] **Generate pretrained fixtures** — `python scripts/generate_numerical_fixtures.py` produces 5 fixtures: ViT, Whisper (3000 mel frames), ConvNeXt, ResNet, DETR.
-- [ ] **Fix pretrained validation tests** — Tests fail due to Axon lazy-init shape inference (ViT patch_embed), missing conv bias (ResNet/DETR), wrong input key (Whisper). Fix: init model first, deep-merge HF weights. See `docs/plans/pretrained-validation-fixes.md` for full plan.
+- [ ] **Run pretrained validation with EXLA** — Structural fixes applied (`.data` map for ViT/Whisper, `build_with_pretrained` init+merge for ResNet/DETR, correct input keys). Too slow for BinaryBackend. Run: `EXLA=1 mix test --include external`. May need tolerance tuning. See `docs/plans/pretrained-validation-fixes.md`.
 - [x] **Generate random-weight fixtures** — 7 SafeTensors files generated, all 8 tests passing.
 - [x] **Verify random-weight key mappings at runtime** — All fixed: LSTM per-gate params, GQA FFN names, Mamba conv transpose, DiT gate sigmoid.
 - [x] **Tune tolerances** — All pass at `atol=1e-4` (GQA at `5e-4`).

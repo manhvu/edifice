@@ -11,6 +11,8 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
     2. Tests download real HuggingFace weights (~350MB for ViT, ~145MB for Whisper)
 
   Tagged :external since they require fixture files + HuggingFace downloads.
+  Full-size models (ViT-base 224x224, ResNet-50, Whisper) are too slow for BinaryBackend;
+  run with EXLA: `EXLA=1 mix test --include external`
   """
   use ExUnit.Case, async: false
 
@@ -18,7 +20,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
 
   @fixtures_dir Path.join([__DIR__, "..", "..", "fixtures", "numerical"])
 
-  defp assert_all_close(actual, expected, opts \\ []) do
+  defp assert_all_close(actual, expected, opts) do
     atol = Keyword.get(opts, :atol, 1.0e-4)
 
     assert Nx.shape(actual) == Nx.shape(expected),
@@ -35,8 +37,27 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
     File.exists?(Path.join(@fixtures_dir, name))
   end
 
+  # Build predict_fn and merge HF weights with zero-init defaults for any missing params.
+  # Needed for models where HF checkpoint is missing params that Axon expects (e.g. conv bias).
+  defp build_with_pretrained(model, hf_state, template) do
+    {init_fn, predict_fn} = Axon.build(model, mode: :inference)
+    full_state = init_fn.(template, Axon.ModelState.empty())
+    merged = deep_merge(full_state.data, hf_state.data)
+    {merged, predict_fn}
+  end
+
+  defp deep_merge(base, overlay) when is_map(base) and is_map(overlay) do
+    Map.merge(base, overlay, fn
+      _k, base_v, overlay_v when is_map(base_v) and is_map(overlay_v) ->
+        deep_merge(base_v, overlay_v)
+
+      _k, _base_v, overlay_v ->
+        overlay_v
+    end)
+  end
+
   describe "ViT forward pass" do
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "matches PyTorch reference output" do
       fixture_file = "vit_reference.safetensors"
 
@@ -47,7 +68,6 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
       end
 
-      # Load fixture
       fixture_path = Path.join(@fixtures_dir, fixture_file)
       fixture = Safetensors.read!(fixture_path)
 
@@ -57,23 +77,21 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
       assert Nx.shape(input) == {1, 3, 224, 224}
       assert Nx.shape(expected_logits) == {1, 1000}
 
-      # Load real pretrained weights
-      {model, params} =
+      {model, hf_params} =
         Edifice.Pretrained.from_hub("google/vit-base-patch16-224",
           build_opts: [num_classes: 1000]
         )
 
-      # Build and run forward pass
+      # Pass .data (plain map) to avoid Axon.ModelState Access protocol issue
       {_init_fn, predict_fn} = Axon.build(model, mode: :inference)
-      output = predict_fn.(params, %{"image" => input})
+      output = predict_fn.(hf_params.data, %{"image" => input})
 
-      # Compare against PyTorch reference
       assert_all_close(output, expected_logits, atol: 1.0e-4)
     end
   end
 
   describe "ConvNeXt forward pass" do
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     @tag :skip
     # Skipped: facebook/convnext-tiny-224 only has pytorch_model.bin (no safetensors).
     # ConvNeXt is validated via random-weight tests in architecture_numerical_test.exs.
@@ -87,7 +105,6 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
       end
 
-      # Load fixture
       fixture_path = Path.join(@fixtures_dir, fixture_file)
       fixture = Safetensors.read!(fixture_path)
 
@@ -97,23 +114,20 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
       assert Nx.shape(input) == {1, 3, 224, 224}
       assert Nx.shape(expected_logits) == {1, 1000}
 
-      # Load real pretrained weights
-      {model, params} =
+      {model, hf_params} =
         Edifice.Pretrained.from_hub("facebook/convnext-tiny-224",
           build_opts: [num_classes: 1000]
         )
 
-      # Build and run forward pass
       {_init_fn, predict_fn} = Axon.build(model, mode: :inference)
-      output = predict_fn.(params, %{"image" => input})
+      output = predict_fn.(hf_params.data, %{"image" => input})
 
-      # Compare against PyTorch reference
       assert_all_close(output, expected_logits, atol: 1.0e-4)
     end
   end
 
   describe "ResNet forward pass" do
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "matches PyTorch reference output" do
       fixture_file = "resnet_reference.safetensors"
 
@@ -124,7 +138,6 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
       end
 
-      # Load fixture (PyTorch saves NCHW, Edifice ResNet expects NHWC)
       fixture_path = Path.join(@fixtures_dir, fixture_file)
       fixture = Safetensors.read!(fixture_path)
 
@@ -137,23 +150,22 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
       # Transpose NCHW → NHWC for Edifice ResNet
       input = Nx.transpose(input_nchw, axes: [0, 2, 3, 1])
 
-      # Load real pretrained weights
-      {model, params} =
+      {model, hf_params} =
         Edifice.Pretrained.from_hub("microsoft/resnet-50",
           build_opts: [num_classes: 1000]
         )
 
-      # Build and run forward pass
-      {_init_fn, predict_fn} = Axon.build(model, mode: :inference)
+      # HF ResNet has no conv bias — init fills zero defaults for missing params
+      template = %{"input" => Nx.template({1, 224, 224, 3}, :f32)}
+      {params, predict_fn} = build_with_pretrained(model, hf_params, template)
       output = predict_fn.(params, %{"input" => input})
 
-      # Compare against PyTorch reference
       assert_all_close(output, expected_logits, atol: 1.0e-4)
     end
   end
 
   describe "DETR forward pass" do
-    @tag timeout: 300_000
+    @tag timeout: 600_000
     test "matches PyTorch reference output" do
       fixture_file = "detr_reference.safetensors"
 
@@ -164,7 +176,6 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
       end
 
-      # Load fixture (PyTorch saves NCHW, Edifice DETR expects NHWC)
       fixture_path = Path.join(@fixtures_dir, fixture_file)
       fixture = Safetensors.read!(fixture_path)
 
@@ -177,8 +188,7 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
       # Transpose NCHW → NHWC for Edifice
       input = Nx.transpose(input_nchw, axes: [0, 2, 3, 1])
 
-      # Load real pretrained weights
-      {model, params} =
+      {model, hf_params} =
         Edifice.Pretrained.from_hub("facebook/detr-resnet-50",
           build_opts: [
             image_size: h,
@@ -187,18 +197,18 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
           ]
         )
 
-      # Build and run forward pass
-      {_init_fn, predict_fn} = Axon.build(model, mode: :inference)
+      # DETR backbone has no conv bias — init fills zero defaults for missing params
+      template = %{"image" => Nx.template({1, h, h, 3}, :f32)}
+      {params, predict_fn} = build_with_pretrained(model, hf_params, template)
       output = predict_fn.(params, %{"image" => input})
 
-      # Compare against PyTorch reference
       assert_all_close(output.class_logits, expected_class_logits, atol: 1.0e-4)
       assert_all_close(output.bbox_pred, expected_bbox_pred, atol: 1.0e-4)
     end
   end
 
   describe "Whisper encoder forward pass" do
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "matches PyTorch reference output" do
       fixture_file = "whisper_encoder_reference.safetensors"
 
@@ -209,7 +219,6 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
         )
       end
 
-      # Load fixture
       fixture_path = Path.join(@fixtures_dir, fixture_file)
       fixture = Safetensors.read!(fixture_path)
 
@@ -218,15 +227,12 @@ defmodule Edifice.Pretrained.NumericalValidationTest do
 
       assert Nx.shape(mel_input) == {1, 80, 3000}
 
-      # Load real pretrained weights
-      {encoder, _decoder, params} =
+      {encoder, _decoder, hf_params} =
         Edifice.Pretrained.from_hub("openai/whisper-base")
 
-      # Build encoder and run forward pass
-      {predict_fn, _} = Axon.build(encoder, mode: :inference)
-      output = predict_fn.(params, %{"mel_spectrogram" => mel_input})
+      {_init_fn, predict_fn} = Axon.build(encoder, mode: :inference)
+      output = predict_fn.(hf_params.data, %{"mel_spectrogram" => mel_input})
 
-      # Compare against PyTorch reference
       assert_all_close(output, expected_output, atol: 1.0e-4)
     end
   end

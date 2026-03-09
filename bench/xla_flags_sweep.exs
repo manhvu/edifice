@@ -51,7 +51,7 @@ defmodule XlaFlagsSweep do
 
   | Option | Values | Default |
   |--------|--------|---------|
-  | :allocator | :bfc, :cuda_async | :cuda_async |
+  | :allocator | :bfc, :cuda_async, :default | :bfc (upstream), :cuda_async (recommended for training) |
   | :memory_fraction | 0.0-1.0 | 0.9 |
   | :preallocate | true/false | true |
   """

@@ -338,6 +338,12 @@ See `docs/cuda_custom_call_debugging.md` for the full debugging methodology and 
 
 - [x] **Investigate `Omitted potentially buggy algorithm eng14{k25=2} for conv` info messages** — Investigated: cuDNN 9.x harmlessly skips algorithm variants during autotuning. Info-level messages from XLA C++ bridged via EXLA.Logger. Already suppressed in tests (`Logger.configure(level: :warning)` in test_helper.exs). Added same suppression to all bench scripts.
 
+### Internal Cleanup (Priority: Medium)
+- [ ] **FNet: replace DFT workaround with native Nx.fft** — FNet and FNO use real-valued DFT matrix multiply instead of Nx.fft because EXLA autodiff used to break. The underlying bug was fixed in elixir-nx/nx#1410 (Dec 2023). Confirmed working on EXLA with test/fft-exla-autodiff branch. Files: `lib/edifice/attention/fnet.ex` (fourier_mixing_real, dft_real_matrix), `lib/edifice/scientific/fno.ex` (fft_1d, ifft_1d, complex_matmul).
+
+### Internal Utils (Priority: Low)
+- [ ] **Mixed precision helper** — Add `Edifice.Utils.Common.with_f32_precision(inputs, fun)` that wraps the save-type/upcast/compute/cast-back boilerplate used ~15 times across fused_ops.ex and other modules. Nx maintainers decided this doesn't belong in Nx core (see elixir-nx/nx#1701).
+
 ### ML-Specific Quality (Priority: Low)
 - [x] **ONNX integration guide** — `guides/onnx_integration.md`. Covers axon_onnx export/import, ortex (ONNX Runtime bindings), when to use which, Edifice-specific limitations (custom kernels export via fallback), and troubleshooting.
 - [x] **Architecture visualization** — `mix edifice.viz mamba` prints layer structure as table (default), ASCII tree (`--format tree`), or Mermaid diagram (`--format mermaid`). Handles tuple-returning models via `--component`. See `Edifice.Display` module.

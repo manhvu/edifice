@@ -4,12 +4,27 @@
 
 238 registered architectures across 26 families, 20 shared blocks, 2500+ tests.
 
+## Future: Nx.Defn.Kernel.while generation loop
+
+Move the autoregressive generation loop (`Serving.Generate`) from Elixir-level
+`Enum.reduce_while` into a `Nx.Defn.Kernel.while` loop inside defn. This would
+eliminate per-token Elixir↔XLA round-trips (~128 boundary crossings for 128 tokens)
+by running the entire decode loop on-device. Requires:
+- Sampling (top-k, top-p, temperature) inside defn
+- KV cache update inside defn
+- Stop-token check via `Nx.Defn.Kernel.cond`
+- Accumulator tensor for generated token IDs
+Blocked on: validating that `while` + `top_k` + `Nx.Random` all compose inside EXLA JIT.
+
 ## Local nx/exla fork (`EDIFICE_LOCAL_NX=1`)
 
 Points to `../nx` (blasphemetheus/nx fork). Key branches:
-- `feat/edifice-lazy-callback-allocator` — lazy CallbackServer + configurable GPU allocator (use for training)
+- `feat/edifice-lazy-callback-allocator` — lazy CallbackServer + configurable GPU allocator + fused selective scan XLA custom call (use for training)
 - `fix/lazy-callback-server` — just the CallbackServer leak fix (PR #1682 upstream)
 - `fix/blackwell-test-compat` — test tolerance fixes for RTX 5090 (cherry-pick for clean local tests)
+
+The fused selective scan is now an XLA custom call in EXLA (no NIF round-trip).
+Edifice's `FusedScan` can switch to `Nx.Shared.optional(:fused_selective_scan, ...)` — the handler in EXLA dispatches to the CUDA kernel on GPU, pure-Nx fallback on CPU.
 
 ## Completed Milestones
 

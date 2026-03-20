@@ -201,8 +201,8 @@ defmodule Edifice.Vision.PoolFormer do
   # Average pooling minus identity along the patch dimension
   # Input: [batch, num_patches, hidden_size]
   # Pools along axis 1 (patch dimension) with the given kernel size
+  # Uses Nx.window_sum for efficient sliding window computation
   defp pool_subtract_compute(input, pool_size) do
-    {batch, seq_len, dim} = Nx.shape(input)
     pad_total = pool_size - 1
     pad_before = div(pad_total, 2)
     pad_after = pad_total - pad_before
@@ -211,13 +211,8 @@ defmodule Edifice.Vision.PoolFormer do
     padded =
       Nx.pad(input, 0.0, [{0, 0, 0}, {pad_before, pad_after, 0}, {0, 0, 0}])
 
-    # Compute sliding average using slicing and accumulation
-    pooled =
-      Enum.reduce(0..(pool_size - 1), Nx.broadcast(0.0, {batch, seq_len, dim}), fn offset, acc ->
-        slice = Nx.slice_along_axis(padded, offset, seq_len, axis: 1)
-        Nx.add(acc, slice)
-      end)
-
+    # Sliding average via Nx.window_sum (replaces manual slice+accumulate loop)
+    pooled = Nx.window_sum(padded, {1, pool_size, 1})
     pooled = Nx.divide(pooled, pool_size)
 
     # Subtract identity: pooled - input

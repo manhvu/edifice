@@ -86,13 +86,17 @@ defmodule Edifice.Recipes do
     checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     monitor = Keyword.get(opts, :monitor, nil)
     adaptive = Keyword.get(opts, :adaptive, nil)
+    optimizer_name = Keyword.get(opts, :optimizer, :adamw)
+    schedule_name = Keyword.get(opts, :schedule, :cosine_decay)
+    extra_metrics = Keyword.get(opts, :extra_metrics, nil)
+    reduce_lr = Keyword.get(opts, :reduce_lr_on_plateau, nil)
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
 
     decay_steps = epochs * steps_per_epoch
-    schedule = Polaris.Schedules.cosine_decay(lr, decay_steps: decay_steps)
-    optimizer = Polaris.Optimizers.adamw(learning_rate: schedule, decay: weight_decay)
+    schedule = build_schedule(schedule_name, lr, decay_steps)
+    optimizer = build_optimizer(optimizer_name, schedule, weight_decay)
 
     loss =
       if label_smoothing > 0.0 do
@@ -110,8 +114,10 @@ defmodule Edifice.Recipes do
       model
       |> Axon.Loop.trainer(loss, optimizer)
       |> Axon.Loop.metric(:accuracy)
+      |> maybe_extra_metrics(extra_metrics)
       |> maybe_validate(model, validation_data)
       |> Axon.Loop.early_stop("loss", patience: patience, mode: :min)
+      |> maybe_reduce_lr(reduce_lr)
       |> maybe_checkpoint(checkpoint_path, validation_data)
       |> maybe_attach_monitor(monitor)
       |> maybe_attach_adaptive(adaptive)
@@ -161,16 +167,19 @@ defmodule Edifice.Recipes do
     checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     monitor = Keyword.get(opts, :monitor, nil)
     adaptive = Keyword.get(opts, :adaptive, nil)
+    optimizer_name = Keyword.get(opts, :optimizer, :adamw)
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
 
     schedule = warmup_cosine_schedule(lr, warmup_steps, decay_steps)
 
+    base_optimizer = build_optimizer(optimizer_name, schedule, weight_decay)
+
     optimizer =
       Polaris.Updates.compose(
         Polaris.Updates.clip_by_global_norm(max_norm: max_grad_norm),
-        Polaris.Optimizers.adamw(learning_rate: schedule, decay: weight_decay)
+        base_optimizer
       )
 
     loss = :categorical_cross_entropy
@@ -234,12 +243,14 @@ defmodule Edifice.Recipes do
     checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     monitor = Keyword.get(opts, :monitor, nil)
     adaptive = Keyword.get(opts, :adaptive, nil)
+    optimizer_name = Keyword.get(opts, :optimizer, :adamw)
+    schedule_name = Keyword.get(opts, :schedule, :cosine_decay)
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
 
-    schedule = Polaris.Schedules.cosine_decay(lr, decay_steps: decay_steps)
-    optimizer = Polaris.Optimizers.adamw(learning_rate: schedule, decay: weight_decay)
+    schedule = build_schedule(schedule_name, lr, decay_steps)
+    optimizer = build_optimizer(optimizer_name, schedule, weight_decay)
 
     loss_fn = fn _y_true, y_pred ->
       infonce_loss(y_pred, temperature)
@@ -311,6 +322,8 @@ defmodule Edifice.Recipes do
     checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     monitor = Keyword.get(opts, :monitor, nil)
     adaptive = Keyword.get(opts, :adaptive, nil)
+    optimizer_name = Keyword.get(opts, :optimizer, :adamw)
+    extra_metrics = Keyword.get(opts, :extra_metrics, nil)
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
@@ -318,7 +331,7 @@ defmodule Edifice.Recipes do
     total_steps = epochs * steps_per_epoch
     warmup_steps = round(total_steps * warmup_ratio)
     schedule = warmup_cosine_schedule(lr, warmup_steps, total_steps)
-    optimizer = Polaris.Optimizers.adamw(learning_rate: schedule, decay: weight_decay)
+    optimizer = build_optimizer(optimizer_name, schedule, weight_decay)
 
     init_state = build_frozen_state(base_params, strategy, head_pattern)
 
@@ -326,6 +339,7 @@ defmodule Edifice.Recipes do
       model
       |> Axon.Loop.trainer(:categorical_cross_entropy, optimizer)
       |> Axon.Loop.metric(:accuracy)
+      |> maybe_extra_metrics(extra_metrics)
       |> maybe_validate(model, validation_data)
       |> attach_init_state(init_state)
       |> maybe_checkpoint(checkpoint_path, validation_data)
@@ -378,29 +392,23 @@ defmodule Edifice.Recipes do
     checkpoint_path = Keyword.get(opts, :checkpoint_path, nil)
     monitor = Keyword.get(opts, :monitor, nil)
     adaptive = Keyword.get(opts, :adaptive, nil)
+    optimizer_name = Keyword.get(opts, :optimizer, :adamw)
+    schedule_name = Keyword.get(opts, :schedule, :cosine_decay)
+    reduce_lr = Keyword.get(opts, :reduce_lr_on_plateau, nil)
+    gradient_opts = Keyword.get(opts, :gradient_updates, [])
     log = Keyword.get(opts, :log, true)
 
     model = maybe_apply_precision(model, precision)
 
     decay_steps = epochs * steps_per_epoch
-    schedule = Polaris.Schedules.cosine_decay(lr, decay_steps: decay_steps)
-    optimizer = Polaris.Optimizers.adamw(learning_rate: schedule, decay: weight_decay)
+    schedule = build_schedule(schedule_name, lr, decay_steps)
+    optimizer = build_optimizer(optimizer_name, schedule, weight_decay)
+    optimizer = maybe_compose_gradient_updates(optimizer, gradient_opts)
 
     loss =
       case loss_type do
         :huber ->
-          fn y_true, y_pred ->
-            diff = Nx.subtract(y_true, y_pred)
-            abs_diff = Nx.abs(diff)
-            # Smooth L1 / Huber with delta=1.0
-            Nx.mean(
-              Nx.select(
-                Nx.less(abs_diff, 1.0),
-                Nx.multiply(0.5, Nx.pow(diff, 2)),
-                Nx.subtract(abs_diff, 0.5)
-              )
-            )
-          end
+          &Axon.Losses.huber(&1, &2, reduction: :mean)
 
         _mse ->
           :mean_squared_error
@@ -409,9 +417,10 @@ defmodule Edifice.Recipes do
     loop =
       model
       |> Axon.Loop.trainer(loss, optimizer)
-      |> Axon.Loop.metric(&mean_absolute_error/2, "mae")
+      |> Axon.Loop.metric(&Axon.Metrics.mean_absolute_error/2, "mae")
       |> maybe_validate(model, validation_data)
       |> Axon.Loop.early_stop("loss", patience: patience, mode: :min)
+      |> maybe_reduce_lr(reduce_lr)
       |> maybe_checkpoint(checkpoint_path, validation_data)
       |> maybe_attach_monitor(monitor)
       |> maybe_attach_adaptive(adaptive)
@@ -577,6 +586,71 @@ defmodule Edifice.Recipes do
   defp maybe_log_grad_norm(loop, true), do: Edifice.Training.Adaptive.log_grad_norm(loop)
   defp maybe_log_grad_norm(loop, opts) when is_list(opts), do: Edifice.Training.Adaptive.log_grad_norm(loop, opts)
 
+  # Build optimizer from name atom + options
+  defp build_optimizer(name, lr_or_schedule, weight_decay) do
+    opts = [learning_rate: lr_or_schedule]
+    opts = if weight_decay > 0, do: Keyword.put(opts, :decay, weight_decay), else: opts
+
+    case name do
+      :adamw -> Polaris.Optimizers.adamw(opts)
+      :adam -> Polaris.Optimizers.adam(opts)
+      :radam -> Polaris.Optimizers.radam(opts)
+      :lamb -> Polaris.Optimizers.lamb(opts)
+      :rmsprop -> Polaris.Optimizers.rmsprop(learning_rate: lr_or_schedule)
+      :sgd -> Polaris.Optimizers.sgd(learning_rate: lr_or_schedule)
+      other -> raise ArgumentError, "unknown optimizer: #{inspect(other)}"
+    end
+  end
+
+  # Build schedule from name atom + options
+  defp build_schedule(name, lr, decay_steps) do
+    case name do
+      :cosine_decay -> Polaris.Schedules.cosine_decay(lr, decay_steps: decay_steps)
+      :exponential_decay -> Polaris.Schedules.exponential_decay(lr, decay_steps: decay_steps)
+      :polynomial_decay -> Polaris.Schedules.polynomial_decay(lr, decay_steps: decay_steps)
+      :linear_decay -> Polaris.Schedules.linear_decay(lr, decay_steps: decay_steps)
+      :constant -> Polaris.Schedules.constant(lr)
+      other -> raise ArgumentError, "unknown schedule: #{inspect(other)}"
+    end
+  end
+
+  # Compose gradient update transforms
+  defp maybe_compose_gradient_updates(optimizer, opts) do
+    max_grad_norm = Keyword.get(opts, :max_grad_norm)
+    centralize = Keyword.get(opts, :centralize, false)
+    add_noise = Keyword.get(opts, :add_noise, false)
+
+    updates =
+      []
+      |> then(fn u -> if centralize, do: [Polaris.Updates.centralize() | u], else: u end)
+      |> then(fn u -> if add_noise, do: [Polaris.Updates.add_noise() | u], else: u end)
+      |> then(fn u -> if max_grad_norm, do: [Polaris.Updates.clip_by_global_norm(max_norm: max_grad_norm) | u], else: u end)
+
+    case updates do
+      [] -> optimizer
+      transforms -> Enum.reduce(transforms, optimizer, &Polaris.Updates.compose(&1, &2))
+    end
+  end
+
+  # Add extra metrics to loop
+  defp maybe_extra_metrics(loop, nil), do: loop
+
+  defp maybe_extra_metrics(loop, metrics) when is_list(metrics) do
+    Enum.reduce(metrics, loop, fn
+      :precision, loop -> Axon.Loop.metric(loop, &Axon.Metrics.precision/2, "precision")
+      :recall, loop -> Axon.Loop.metric(loop, &Axon.Metrics.recall/2, "recall")
+      :sensitivity, loop -> Axon.Loop.metric(loop, &Axon.Metrics.sensitivity/2, "sensitivity")
+      :specificity, loop -> Axon.Loop.metric(loop, &Axon.Metrics.specificity/2, "specificity")
+      :top_k_accuracy, loop -> Axon.Loop.metric(loop, &Axon.Metrics.top_k_categorical_accuracy(&1, &2, k: 5), "top_5_accuracy")
+      _, loop -> loop
+    end)
+  end
+
+  # Reduce LR on plateau
+  defp maybe_reduce_lr(loop, nil), do: loop
+  defp maybe_reduce_lr(loop, true), do: Axon.Loop.reduce_lr_on_plateau(loop, "loss", mode: :min)
+  defp maybe_reduce_lr(loop, opts) when is_list(opts), do: Axon.Loop.reduce_lr_on_plateau(loop, "loss", opts)
+
   defp warmup_cosine_schedule(peak_lr, warmup_steps, total_steps) do
     decay_steps = max(total_steps - warmup_steps, 1)
 
@@ -653,7 +727,5 @@ defmodule Edifice.Recipes do
     Nx.exp(loss)
   end
 
-  defp mean_absolute_error(y_true, y_pred) do
-    Nx.mean(Nx.abs(Nx.subtract(y_true, y_pred)))
-  end
+  # mean_absolute_error removed — use Axon.Metrics.mean_absolute_error/2 directly
 end

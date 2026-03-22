@@ -362,4 +362,105 @@ defmodule Edifice.RecipesTest do
       assert %Axon.Loop{} = loop
     end
   end
+
+  # ===========================================================================
+  # Optimizer / Schedule / Metrics options
+  # ===========================================================================
+
+  describe "optimizer option" do
+    test "classify with adam" do
+      loop = Recipes.classify(build_classifier(), num_classes: @num_classes, optimizer: :adam, log: false)
+      assert %Axon.Loop{} = loop
+    end
+
+    test "classify with radam" do
+      loop = Recipes.classify(build_classifier(), num_classes: @num_classes, optimizer: :radam, log: false)
+      assert %Axon.Loop{} = loop
+    end
+
+    test "classify with sgd" do
+      loop = Recipes.classify(build_classifier(), num_classes: @num_classes, optimizer: :sgd, log: false)
+      assert %Axon.Loop{} = loop
+    end
+
+    test "language_model with lamb" do
+      loop = Recipes.language_model(build_lm(), vocab_size: @num_classes, optimizer: :lamb, log: false)
+      assert %Axon.Loop{} = loop
+    end
+
+    test "regress with rmsprop" do
+      model = Axon.input("x", shape: {nil, @embed_dim}) |> Axon.dense(1, name: "out")
+      loop = Recipes.regress(model, optimizer: :rmsprop, log: false)
+      assert %Axon.Loop{} = loop
+    end
+  end
+
+  describe "schedule option" do
+    test "classify with exponential_decay" do
+      loop = Recipes.classify(build_classifier(), num_classes: @num_classes, schedule: :exponential_decay, log: false)
+      assert %Axon.Loop{} = loop
+    end
+
+    test "classify with linear_decay" do
+      loop = Recipes.classify(build_classifier(), num_classes: @num_classes, schedule: :linear_decay, log: false)
+      assert %Axon.Loop{} = loop
+    end
+
+    test "classify with constant" do
+      loop = Recipes.classify(build_classifier(), num_classes: @num_classes, schedule: :constant, log: false)
+      assert %Axon.Loop{} = loop
+    end
+
+    test "regress with polynomial_decay" do
+      model = Axon.input("x", shape: {nil, @embed_dim}) |> Axon.dense(1, name: "out")
+      loop = Recipes.regress(model, schedule: :polynomial_decay, log: false)
+      assert %Axon.Loop{} = loop
+    end
+  end
+
+  describe "extra_metrics option" do
+    test "classify with precision and recall" do
+      loop = Recipes.classify(build_classifier(),
+        num_classes: @num_classes,
+        extra_metrics: [:precision, :recall],
+        log: false
+      )
+      assert %Axon.Loop{} = loop
+    end
+
+    test "fine_tune with extra_metrics" do
+      {init_fn, _} = Axon.build(build_classifier())
+      params = init_fn.(Nx.template({1, @embed_dim}, :f32), Axon.ModelState.empty())
+      loop = Recipes.fine_tune(build_classifier(), params,
+        extra_metrics: [:precision, :sensitivity],
+        log: false
+      )
+      assert %Axon.Loop{} = loop
+    end
+  end
+
+  describe "reduce_lr_on_plateau option" do
+    test "classify with reduce_lr_on_plateau: true" do
+      loop = Recipes.classify(build_classifier(),
+        num_classes: @num_classes,
+        reduce_lr_on_plateau: true,
+        log: false
+      )
+      assert %Axon.Loop{} = loop
+    end
+
+    test "regress with reduce_lr_on_plateau opts" do
+      model = Axon.input("x", shape: {nil, @embed_dim}) |> Axon.dense(1, name: "out")
+      loop = Recipes.regress(model, reduce_lr_on_plateau: [mode: :min, patience: 3], log: false)
+      assert %Axon.Loop{} = loop
+    end
+  end
+
+  describe "gradient_updates option" do
+    test "regress with gradient noise" do
+      model = Axon.input("x", shape: {nil, @embed_dim}) |> Axon.dense(1, name: "out")
+      loop = Recipes.regress(model, gradient_updates: [add_noise: true], log: false)
+      assert %Axon.Loop{} = loop
+    end
+  end
 end

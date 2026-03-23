@@ -265,12 +265,26 @@ defmodule Edifice.CUDA.AutoTune do
         winner
       rescue
         e ->
-          Logger.warning(
-            "[AutoTune] Benchmark failed for #{kernel_name}: #{Exception.message(e)}, defaulting to fused"
-          )
+          msg = Exception.message(e)
 
-          key = cache_key(kernel_name, dim, dtype)
-          :persistent_term.put(key, :fused)
+          if String.contains?(msg, "JIT compilation") do
+            # Only log once per kernel to avoid spam during tracing
+            jit_warn_key = {:__autotune_jit_warned__, kernel_name}
+
+            unless Process.get(jit_warn_key, false) do
+              Process.put(jit_warn_key, true)
+
+              Logger.info(
+                "[AutoTune] #{kernel_name} — skipped (inside JIT). Call AutoTune.warmup() before training for optimal dispatch."
+              )
+            end
+          else
+            Logger.warning(
+              "[AutoTune] Benchmark failed for #{kernel_name}: #{msg}, defaulting to fused"
+            )
+          end
+
+          # Don't cache — allows warmup/1 to re-benchmark outside JIT
           :fused
       after
         Process.delete(:__edifice_benchmarking__)
